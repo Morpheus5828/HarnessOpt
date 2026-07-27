@@ -125,7 +125,6 @@ class AppController:
 
         self.shared_state = shared_state
         self.data_lock = data_lock
-        self.geom_lock = threading.Lock()
         self.benchmark_algos = benchmark_algos
 
         self.mesh = None
@@ -835,7 +834,14 @@ class AppController:
                     agent_meshes[name],
                     self.shared_state,
                     self.data_lock,
-                    self.geom_lock,
+                    # ⚡ None (pas self.geom_lock) : chaque agent a son PROPRE maillage/ProximityQuery
+                    # privé (agent_meshes[name] plus haut), donc rien à protéger entre threads. Passer
+                    # le MÊME verrou à tous les agents forçait toutes leurs requêtes géométriques
+                    # (~10 par itération, sur le chemin le plus chaud du calcul) à se mettre en file
+                    # d'attente les unes derrière les autres, sérialisant de fait l'essentiel du
+                    # travail des ~5 threads d'agent. algo_worker crée déjà un verrou LOCAL par thread
+                    # quand on lui passe None (voir "if geom_lock is None:").
+                    None,
                     self.point_A,
                     self.point_B
                 ), daemon=True).start()
