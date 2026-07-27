@@ -90,13 +90,14 @@ def algo_worker(
             exploration_noise = cfg["exploration_noise_start"]
             local_pts = int(cfg["initial_points"])
 
-            # 🔥 NOUVEAU : L'agent récupère les fixations si l'option est cochée
-            inter_pts = []
-            if cfg.get("force_fixations", False):
-                inter_pts = [c["position"] for c in cfg.get("existing_crabes", [])]
-
-        original_waypoints = generate_dense_waypoints(point_A, point_B, local_pts, mesh=mesh,
-                                                      intermediate_points=inter_pts)
+        # ⚠️ Le contrôleur a DÉJÀ calculé ce chemin géodésique une seule fois (de façon sûre,
+        # sur le thread principal) et l'a passé ici via le paramètre 'initial_waypoints' : on le
+        # réutilise tel quel au lieu de relancer un second calcul géodésique. Le recalculer ici
+        # faisait tourner ~5 calculs géodésiques concurrents (un par thread d'agent) à l'instant
+        # du Play, ce qui pouvait faire échouer silencieusement certains d'entre eux (repli sur
+        # une ligne droite) -> c'est pour ça que le tracé géodésique ne s'affichait pas
+        # correctement dès le début.
+        original_waypoints = np.asarray(initial_waypoints, dtype=np.float32).copy()
         with data_lock:
             shared_state["algos"][algo_name]["waypoints"] = original_waypoints.copy()
             shared_state["algos"][algo_name]["initial_waypoints"] = original_waypoints.copy()
@@ -228,12 +229,12 @@ def algo_worker(
                     exploration_noise = cfg["exploration_noise_start"]
                     local_pts = int(cfg["initial_points"])
 
-                    inter_pts = []
-                    if cfg.get("force_fixations", False):
-                        inter_pts = [c["position"] for c in cfg.get("existing_crabes", [])]
-
-                    original_waypoints = generate_dense_waypoints(point_A, point_B, local_pts, mesh=mesh,
-                                                                  intermediate_points=inter_pts)
+                    # Même logique qu'au démarrage : le contrôleur vient d'écrire le nouveau
+                    # chemin de départ dans shared_state["waypoints"] juste avant de remettre
+                    # l'itération à 0 (wp_current, lu juste au-dessus, EST déjà ce chemin) ->
+                    # on le réutilise au lieu de relancer un calcul géodésique en concurrence
+                    # avec tous les autres threads d'agent au moment du reset.
+                    original_waypoints = wp_current.copy()
                     success_streak = 0
                     wp_current = original_waypoints.copy()
                     prev_disp = None

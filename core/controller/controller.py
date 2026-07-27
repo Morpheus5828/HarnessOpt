@@ -153,6 +153,36 @@ class AppController:
         self.is_typing = False
         self.is_scanning = False
 
+        # 🛑 Anti-crash "GIL held" : le rendu VTK est incrusté dans Tk via un hack bas niveau
+        # (SetParentInfo/SetWindowId sur le HWND natif), pas une vraie intégration Tk/VTK. Quand
+        # on déplace/redimensionne la fenêtre, l'OS entre dans une boucle de messages modale ;
+        # si notre boucle de rendu (pilotée par un timer Tk indépendant) continue d'appeler
+        # plotter.render()/iren.process_events() PENDANT ce déplacement, l'appel peut réentrer
+        # dans VTK à un moment où l'état de l'interpréteur ne tient plus -> crash fatal
+        # "the function must be called with the GIL held" (non rattrapable par un try/except).
+        # On suspend donc notre rendu pendant le déplacement et on ne le relance qu'une fois la
+        # fenêtre stabilisée (anti-rebond), et on empêche aussi deux passages de _update_loop de
+        # se chevaucher (Tk peut re-déclencher les callbacks "after" pendant sa boucle modale).
+        self._render_suspended = False
+        self._render_resume_after_id = None
+        self._loop_busy = False
+        self.view.bind("<Configure>", self._on_window_configure, add="+")
+
+    def _on_window_configure(self, event):
+        if event.widget is not self.view:
+            return
+        self._render_suspended = True
+        if self._render_resume_after_id is not None:
+            try:
+                self.view.after_cancel(self._render_resume_after_id)
+            except Exception:
+                pass
+        self._render_resume_after_id = self.view.after(250, self._resume_render)
+
+    def _resume_render(self):
+        self._render_suspended = False
+        self._render_resume_after_id = None
+
     def _ensure_algo_widgets(self, page):
         if not hasattr(page, "algo_widgets"):
             page.algo_widgets = {}
@@ -449,6 +479,19 @@ class AppController:
     def _update_loop(self):
         if not getattr(self, 'plotter', None) or not hasattr(self.plotter, 'render_window'): return
 
+        if self._render_suspended or self._loop_busy:
+            # Fenêtre en cours de déplacement/redimensionnement (ou tick précédent pas encore
+            # terminé) : on ne touche à AUCUN objet VTK ce tour-ci, on se recale juste plus tard.
+            self.view.after(50, self._update_loop)
+            return
+
+        self._loop_busy = True
+        try:
+            self._update_loop_body()
+        finally:
+            self._loop_busy = False
+
+    def _update_loop_body(self):
         page = self.view.pages.get("agent")
 
         current_focus = self.view.focus_get()
