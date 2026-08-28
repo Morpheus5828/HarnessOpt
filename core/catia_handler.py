@@ -1,35 +1,126 @@
-from pathlib import Path
-import pythoncom
+"""Connecteur CATIA : export des pièces en STL et réimport du faisceau.
+
+Le dialogue avec CATIA passe par une macro VBScript écrite à la volée puis
+exécutée via ``SystemService.ExecuteScript``. Ce module ne fonctionne donc que
+sous Windows, avec CATIA lancé et pywin32 installé.
+
+Les dépendances Windows (``pythoncom``, ``win32com``) sont importées **à
+l'appel** et non au chargement du module : le reste de l'application peut ainsi
+importer ce fichier sur n'importe quelle plateforme et afficher un message
+clair, au lieu de casser à l'import.
+
+Attention à l'écriture des macros : le code VBScript est produit par des
+f-strings **brutes** (``rf"..."``). VBScript n'a pas de caractère d'échappement
+dans ses littéraux, donc un antislash doit arriver tel quel dans la macro.
+Avec une f-string ordinaire, Python consomme ces antislashes avant que la macro
+ne soit écrite.
+"""
+
+from __future__ import annotations
+
+import glob
 import os
-import win32com.client
+from pathlib import Path
 
-BASE_CACHE = Path(r"C:\Temp\HarnessOpt_cache")
-STL_FOLDER = BASE_CACHE / "stl"
-COLOR_DIR = BASE_CACHE / "color"
-FUSION_DIR = BASE_CACHE / "fusion"
-COLOR_PATH = COLOR_DIR / "dmu_color_parts.xlsx"
+# Une seule définition des dossiers de travail, partagée avec le reste de
+# l'application. Auparavant ce module fixait « C:\\Temp\\HarnessOpt_cache »
+# tandis que l'application lisait le cache renvoyé par core.paths : l'export
+# CATIA déposait donc les STL dans un dossier que personne n'allait relire.
+from core.paths import BASE_CACHE, COLOR_DIR, FUSION_DIR, STL_DIR, ensure_cache_folders
 
-def run_catia_export_via_vba(exclude_str=""):
-    import os
-    import glob
-    import pythoncom
-    import win32com.client
+__all__ = [
+    "CatiaError",
+    "BASE_CACHE",
+    "STL_FOLDER",
+    "COLOR_DIR",
+    "FUSION_DIR",
+    "COLOR_PATH",
+    "build_export_macro",
+    "build_import_macro",
+    "run_catia_export_via_vba",
+    "load_path_in_catia",
+]
 
-    pythoncom.CoInitialize()
+STL_FOLDER: Path = STL_DIR
+COLOR_PATH: Path = COLOR_DIR / "dmu_color_parts.xlsx"
 
-    if os.path.exists(STL_FOLDER):
-        print("🧹 Nettoyage des anciens fichiers STL dans le cache...")
-        for filepath in glob.glob(os.path.join(STL_FOLDER, "*.stl")):
-            try:
-                os.remove(filepath)
-            except Exception as e:
-                print(f"⚠️ Impossible de supprimer l'ancien fichier {filepath}: {e}")
-    else:
-        os.makedirs(STL_FOLDER)
-    # -----------------------------------------------
 
-    vba_code = f"""
-Const EXPORT_FOLDER = "{STL_FOLDER}\\"
+class CatiaError(RuntimeError):
+    """CATIA est injoignable, ou la macro a échoué."""
+
+
+def _com():
+    """Importe pythoncom et win32com à la demande.
+
+    Raises:
+        CatiaError: si pywin32 n'est pas disponible (autre système, ou paquet
+            absent), avec un message exploitable par l'utilisateur.
+    """
+    try:
+        import pythoncom
+        import win32com.client
+    except ImportError as exc:
+        raise CatiaError(
+            "Le pilotage de CATIA nécessite Windows et le paquet pywin32.\n\n"
+            f"Détail : {exc}\n\n"
+            "Choisissez « Un dossier de fichiers STL déjà exportés » pour "
+            "travailler sans CATIA, ou installez pywin32 :\n"
+            "    pip install pywin32"
+        ) from exc
+    return pythoncom, win32com.client
+
+
+def _run_macro(win32, name: str, code: str):
+    """Écrit une macro VBScript dans le dossier temporaire et la fait exécuter."""
+    temp_dir = os.environ.get("TEMP") or os.environ.get("TMP") or r"C:\Temp"
+    os.makedirs(temp_dir, exist_ok=True)
+
+    macro_path = os.path.join(temp_dir, name)
+    with open(macro_path, "w", encoding="utf-8") as handle:
+        handle.write(code)
+
+    try:
+        catia = win32.Dispatch("CATIA.Application")
+    except Exception as exc:
+        raise CatiaError(
+            "Impossible de joindre CATIA.\n\n"
+            "Vérifiez que CATIA est lancé et qu'un document est ouvert, "
+            "puis relancez l'opération.\n\n"
+            f"Détail : {exc}"
+        ) from exc
+
+    try:
+        catia.SystemService.ExecuteScript(temp_dir, 1, name, "CATMain", [])
+    except Exception as exc:
+        # La macro laisse CATIA en mode non interactif pendant son exécution :
+        # si elle échoue en cours de route, l'interface resterait figée.
+        try:
+            catia.Interactive = True
+            catia.RefreshDisplay = True
+            catia.DisplayFileAlerts = True
+        except Exception:
+            pass
+        raise CatiaError(
+            f"L'exécution de la macro CATIA a échoué.\n\nDétail : {exc}"
+        ) from exc
+
+    return catia
+
+
+def build_export_macro(export_dir: str, exclude_str: str = "") -> str:
+    """Construit la macro VBScript d'export.
+
+    Fonction pure, isolée du dialogue COM pour être vérifiable sans Windows :
+    c'est ici que se jouait un bogue silencieux. La f-string doit rester
+    BRUTE (préfixe ``rf``), sinon Python consomme les antislashes et la ligne
+    qui assainit les noms de pièces devient un ``Replace`` de chaîne vide. Une
+    pièce dont le nom CATIA contient un antislash produisait alors un chemin
+    vers un sous-dossier inexistant, et son export échouait sans bruit sous
+    ``On Error Resume Next`` : la pièce manquait dans la maquette sans que
+    rien ne le signale.
+    """
+    return rf"""
+Const EXPORT_FOLDER = "{export_dir}"
 Const EXCLUDE_FILTER = "{exclude_str}"
 Function IsExcluded(itemName)
     IsExcluded = False
@@ -100,76 +191,107 @@ Sub GetLeafProducts(prod, dict)
         Dim i: For i = 1 To children.Count: Call GetLeafProducts(children.Item(i), dict): Next
     End If
 End Sub
+"""
+
+
+def build_import_macro(abs_path: str) -> str:
+    """Construit la macro VBScript d'insertion d'un STL dans le produit actif.
+
+    Volontairement sans ``MsgBox`` : une boîte de dialogue ouverte par la macro
+    attend un clic dans CATIA et bloquerait l'application sans rien afficher de
+    son côté. La macro sort, et c'est Python qui rend compte.
     """
+    return rf"""
+Sub CATMain()
+    Dim doc
+    On Error Resume Next
+    Set doc = CATIA.ActiveDocument
+    On Error GoTo 0
+    If doc Is Nothing Then Exit Sub
+
+    Dim rootProduct: Set rootProduct = doc.Product
+    Dim components: Set components = rootProduct.Products
+    Dim filesToInsert(0): filesToInsert(0) = "{abs_path}"
+    components.AddComponentsFromFiles filesToInsert, "All"
+End Sub
+"""
+
+
+def run_catia_export_via_vba(exclude_str: str = "") -> Path:
+    """Exporte chaque pièce du produit actif en STL, dans le cache de travail.
+
+    Args:
+        exclude_str: motifs séparés par des virgules (``U258*, *-DUMMY``)
+            désignant les pièces à ne pas exporter.
+
+    Returns:
+        Le dossier contenant les STL produits.
+
+    Raises:
+        CatiaError: pywin32 absent, CATIA injoignable, ou macro en échec.
+            L'erreur remonte volontairement jusqu'à l'interface : la version
+            précédente se contentait de l'afficher en console, et l'utilisateur
+            voyait ensuite « aucun fichier .stl trouvé » sans savoir pourquoi.
+    """
+    pythoncom, win32 = _com()
+    pythoncom.CoInitialize()
     try:
-        temp_dir = os.environ.get("TEMP", r"C:\Temp")
-        macro_path = os.path.join(temp_dir, "HarnessOpt_Export.catvbs")
-        with open(macro_path, "w", encoding="utf-8") as f:
-            f.write(vba_code)
-        catia = win32com.client.Dispatch("CATIA.Application")
-        catia.SystemService.ExecuteScript(temp_dir, 1, "HarnessOpt_Export.catvbs", "CATMain", [])
-    except Exception as e:
-        try:
-            catia = win32com.client.GetActiveObject("CATIA.Application")
-            catia.Interactive = True
-        except:
-            pass
-        print(f"Erreur VBA : {e}")
+        ensure_cache_folders()
+        os.makedirs(STL_FOLDER, exist_ok=True)
+
+        print("🧹 Nettoyage des anciens fichiers STL dans le cache...")
+        for filepath in glob.glob(os.path.join(str(STL_FOLDER), "*.stl")):
+            try:
+                os.remove(filepath)
+            except OSError as exc:
+                print(f"⚠️ Impossible de supprimer l'ancien fichier {filepath} : {exc}")
+
+        # Chemin terminé par un séparateur : la macro y concatène le nom de
+        # fichier directement.
+        export_dir = os.path.join(str(STL_FOLDER), "")
+
+        vba_code = build_export_macro(export_dir, exclude_str)
+
+        _run_macro(win32, "HarnessOpt_Export.catvbs", vba_code)
+
+        produced = glob.glob(os.path.join(str(STL_FOLDER), "*.stl"))
+        if not produced:
+            raise CatiaError(
+                "La macro s'est exécutée mais n'a produit aucun fichier STL.\n\n"
+                "Vérifiez qu'un Product est bien actif dans CATIA et que le "
+                "filtre d'exclusion n'écarte pas toutes les pièces."
+            )
+
+        print(f"✅ {len(produced)} pièce(s) exportée(s) vers {STL_FOLDER}")
+        return STL_FOLDER
+
     finally:
         pythoncom.CoUninitialize()
 
-def load_path_in_catia(self, stl_path):
-    """Insère le STL généré directement dans le document CATIA actif."""
-    import threading
 
-    def run_import():
-        import win32com.client
-        import pythoncom
-        import os
+def load_path_in_catia(stl_path: str | Path) -> None:
+    """Insère un STL de faisceau dans le document CATIA actif.
 
-        pythoncom.CoInitialize()
-        try:
-            print(f"⏳ Importation du STL {os.path.basename(stl_path)} dans CATIA...")
-            abs_path = os.path.abspath(stl_path)
+    Appel bloquant : à lancer depuis un fil d'exécution séparé si l'interface
+    doit rester réactive. La version précédente créait elle-même son fil, ce
+    qui empêchait l'appelant de savoir si l'import avait réussi.
 
-            catia = win32com.client.Dispatch("CATIA.Application")
+    Raises:
+        CatiaError: pywin32 absent, CATIA injoignable, ou macro en échec.
+    """
+    pythoncom, win32 = _com()
+    pythoncom.CoInitialize()
+    try:
+        abs_path = os.path.abspath(str(stl_path))
+        if not os.path.exists(abs_path):
+            raise CatiaError(f"Fichier introuvable : {abs_path}")
 
-            # Le script VBS est très robuste pour forcer l'ajout dans le produit actif
-            vba_code = f"""
-            Sub CATMain()
-                On Error Resume Next
-                Dim doc
-                Set doc = CATIA.ActiveDocument
-                If doc Is Nothing Then
-                    MsgBox "Aucun document actif dans CATIA. Veuillez ouvrir un Product.", vbCritical
-                    Exit Sub
-                End If
+        print(f"⏳ Importation de {os.path.basename(abs_path)} dans CATIA...")
 
-                Dim rootProduct
-                Set rootProduct = doc.Product
+        vba_code = build_import_macro(abs_path)
 
-                Dim components
-                Set components = rootProduct.Products
+        _run_macro(win32, "HarnessOpt_Import.catvbs", vba_code)
+        print("✅ Faisceau importé dans le document CATIA actif.")
 
-                Dim filesToInsert(0)
-                filesToInsert(0) = "{abs_path}"
-
-                components.AddComponentsFromFiles filesToInsert, "All"
-            End Sub
-            """
-            temp_dir = os.environ.get("TEMP", r"C:\Temp")
-            macro_path = os.path.join(temp_dir, "HarnessOpt_Import.catvbs")
-            with open(macro_path, "w", encoding="utf-8") as f:
-                f.write(vba_code)
-
-            # Exécution du script
-            catia.SystemService.ExecuteScript(temp_dir, 1, "HarnessOpt_Import.catvbs", "CATMain", [])
-            print("✅ Faisceau importé dans le document CATIA actif avec succès !")
-
-        except Exception as e:
-            print(f"❌ Erreur d'import CATIA : {e}")
-        finally:
-            pythoncom.CoUninitialize()
-
-    # On lance dans un thread pour ne pas geler Tkinter
-    threading.Thread(target=run_import, daemon=True).start()
+    finally:
+        pythoncom.CoUninitialize()

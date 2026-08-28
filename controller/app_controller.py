@@ -717,6 +717,9 @@ class AppController:
                 return self._export_csv(agent_name, waypoints, crabes)
             if kind == "report":
                 return self._export_report(agent_name, report)
+            if kind == "catia":
+                self._send_to_catia(agent_name, waypoints)
+                return ""
             return self._export_stl(agent_name, waypoints)
         except Exception as exc:
             self.view.set_status(f"Échec de l'export : {exc}", "danger")
@@ -757,6 +760,32 @@ class AppController:
                     f"{i};{point[0]:.3f};{point[1]:.3f};{point[2]:.3f};{fixation}\n"
                 )
         return os.path.basename(path)
+
+    def _send_to_catia(self, agent_name: str, waypoints):
+        """Écrit le tube dans le cache, puis l'insère dans le CATIA ouvert.
+
+        L'insertion passe par une macro exécutée par CATIA : c'est bloquant, et
+        cela peut prendre plusieurs secondes. On le fait donc dans un fil
+        séparé, et on rend compte à l'utilisateur quand c'est fini — plutôt que
+        de figer l'interface sans explication.
+        """
+        import pyvista as pv
+
+        radius = self.rules.harness.radius_mm if self.rules else 20.0
+        paths.ensure_cache_folders()
+        stl_path = paths.RUNS_DIR / f"faisceau_{agent_name}.stl"
+        pv.lines_from_points(waypoints).tube(radius=radius, n_sides=24).save(str(stl_path))
+
+        def run():
+            try:
+                from core.catia_handler import load_path_in_catia
+
+                load_path_in_catia(stl_path)
+                self._post(self.view.pages[3].report_catia_result, True, "")
+            except Exception as exc:
+                self._post(self.view.pages[3].report_catia_result, False, str(exc))
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _export_report(self, agent_name: str, report) -> str:
         if report is None:

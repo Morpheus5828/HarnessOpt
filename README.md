@@ -24,10 +24,12 @@ sous Windows, `~/.cache/harnessopt` ailleurs). Pour le forcer :
 HARNESSOPT_CACHE=/chemin/de/mon/cache python main.py
 ```
 
-L'export CATIA nécessite Windows, CATIA et un module `core/catia_handler.py`
-propre au poste (non versionné, car il dépend de l'installation locale). Sans
-lui, tout le reste fonctionne : il suffit de travailler à partir d'un dossier
-de STL déjà exportés.
+L'export CATIA (`core/catia_handler.py`) nécessite Windows, CATIA lancé et
+pywin32. Sans eux, tout le reste fonctionne : il suffit de travailler à partir
+d'un dossier de STL déjà exportés. Le connecteur s'importe sur toutes les
+plateformes et ne signale l'absence de CATIA qu'au moment où on l'appelle,
+avec un message distinct selon la cause (pywin32 absent, CATIA injoignable,
+macro en échec).
 
 ---
 
@@ -40,7 +42,7 @@ Un assistant en quatre étapes, qui se déverrouillent au fur et à mesure.
 | **1. Projet** | Désigner le dossier de STL (ou lancer l'export CATIA), assembler la maquette, voir la répartition des pièces par famille. |
 | **2. Règles** | Régler diamètre du toron, rayon de cintrage, distances mini/maxi, distances renforcées par famille, pas entre fixations. |
 | **3. Cheminement** | Poser départ et arrivée, choisir une équipe d'agents et le réglage exploration/exploitation, lancer, suivre en direct. |
-| **4. Rapport** | Lire le verdict règle par règle, exporter en STL, CSV ou JSON. |
+| **4. Rapport** | Lire le verdict règle par règle, exporter en STL, CSV ou JSON, réinsérer le faisceau dans le document CATIA ouvert. |
 
 Tout est exprimé en unités physiques et en vocabulaire métier. Les
 hyperparamètres d'algorithme ne sont pas exposés par défaut : le curseur
@@ -163,6 +165,26 @@ cloison.
 
 ---
 
+## Le connecteur CATIA
+
+Le dialogue avec CATIA passe par une macro VBScript écrite à la volée puis
+exécutée via `SystemService.ExecuteScript`.
+
+**Les macros doivent être construites avec des f-strings brutes** (`rf"..."`).
+VBScript n'a aucun caractère d'échappement dans ses littéraux : un antislash
+doit arriver tel quel. Avec une f-string ordinaire, Python les consomme avant
+l'écriture du fichier, et la ligne qui assainit les noms de pièces devient un
+`Replace` de chaîne vide. Une pièce dont le nom CATIA contient un antislash
+produit alors un chemin vers un sous-dossier inexistant : son export échoue
+sans bruit sous `On Error Resume Next`, et la pièce manque dans la maquette
+sans qu'aucun message ne le signale.
+
+`build_export_macro` et `build_import_macro` sont des fonctions pures, isolées
+du dialogue COM pour être vérifiables sans Windows — `tests/test_catia_handler.py`
+couvre ce cas de régression.
+
+---
+
 ## Organisation du code
 
 ```
@@ -178,6 +200,7 @@ core/
   agent_worker.py           boucle d'optimisation d'un agent
   mesh_processor.py         extraction et fusion du DMU (processus séparé)
   mesh_model.py             classification des pièces par couleur
+  catia_handler.py          export STL et réimport du faisceau via macros CATIA
   agent/                    réseaux (acteur, critique), mémoires, outils géométriques
   path_managment/           détection des fixations existantes (ICP Open3D)
 controller/
@@ -187,7 +210,7 @@ ui/
   theme.py  i18n.py         charte graphique, traductions FR/EN/DE/ES
   charts.py  viewer3d.py    courbes de progression, vue 3D
   widgets/  pages/          composants et écrans
-tests/                      112 tests hors interface, 30 tests d'interface
+tests/                      133 tests hors interface, 30 tests d'interface
 ```
 
 `core/geometry_metrics.py`, `core/routing_rules.py`, `core/reward_terms.py` et
