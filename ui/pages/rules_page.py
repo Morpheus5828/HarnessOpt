@@ -153,16 +153,36 @@ class RulesPage(ctk.CTkScrollableFrame):
         actions.pack(fill="x", pady=(0, SPACE.LG))
 
         self.btn_reset = ctk.CTkButton(
-            actions, text=t("rules.reset"), height=38, width=220, font=FONT.BODY_BOLD,
-            fg_color="transparent", border_width=1, border_color=current().BORDER,
-            text_color=current().TEXT, hover_color=current().SURFACE_ALT,
+            actions, text=t("rules.reset"), height=42, width=220, font=FONT.BODY_BOLD,
+            fg_color="transparent", border_width=1, border_color=theme.BORDER,
+            text_color=theme.TEXT, hover_color=theme.SURFACE_ALT,
             command=self.reset_defaults,
         )
         self.btn_reset.pack(side="left")
 
+        # Un assistant doit dire où aller ensuite. Sans ce bouton, il fallait
+        # deviner qu'on avance en cliquant le numéro d'étape en haut de page.
+        self.btn_continue = ctk.CTkButton(
+            actions, text=t("rules.continue"), height=42, font=FONT.H3,
+            fg_color=theme.accent, command=self._on_continue,
+        )
+        self.btn_continue.pack(side="right")
+
         self._refresh_bend()
 
     # -- réactions ------------------------------------------------------
+
+    def _on_continue(self):
+        """Valide les règles et passe au cheminement, ou dit ce qui cloche."""
+        problems = self.validate()
+        if problems:
+            self.app.set_status(problems[0], "warn")
+            return
+
+        self.app.remember(**{k: v for k, v in self.collect().items() if k != "family_clearance"})
+        self.app.remember(family_clearance=self.collect()["family_clearance"])
+        self.app.set_status(self.t("rules.ready"), "ok")
+        self.app.show_step(2)
 
     def _refresh_bend(self):
         diameter = self.f_diameter.get(40.0)
@@ -279,4 +299,5 @@ class RulesPage(ctk.CTkScrollableFrame):
         self.f_clamp_model.set_label(t("rules.clamp_model"), t("rules.clamp_model.help"))
         self.f_clamp_model.set_browse_text(t("project.browse"))
         self.btn_reset.configure(text=t("rules.reset"))
+        self.btn_continue.configure(text=t("rules.continue"))
         self._refresh_bend()

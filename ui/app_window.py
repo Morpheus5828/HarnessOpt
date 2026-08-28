@@ -5,8 +5,10 @@ verrouillage : rien n'indiquait qu'il fallait charger la maquette avant de
 lancer un agent, et lancer l'agent sans maquette produisait un cube de 1 mm de
 côté sans le moindre message.
 
-Ici le déroulé est explicite : les étapes se déverrouillent au fur et à mesure,
-et l'application dit toujours pourquoi une étape n'est pas encore accessible.
+Ici le déroulé est explicite. Une étape est accessible ou non selon l'état
+réel du projet — maquette chargée, règles cohérentes, cheminement lancé — et
+non selon les écrans déjà visités ; l'application dit toujours ce qui manque
+pour atteindre celle qu'on lui demande.
 """
 
 from __future__ import annotations
@@ -167,12 +169,44 @@ class AppWindow(ctk.CTk):
 
     # -- navigation --------------------------------------------------------
 
+    def refresh_steps(self) -> int:
+        """Recalcule les étapes accessibles et renvoie la plus avancée.
+
+        L'accès se déduit de ce qui est fait (maquette chargée, règles
+        cohérentes, cheminement lancé) plutôt que de s'accumuler au fil des
+        visites : une étape ne peut donc plus rester fermée parce que personne
+        n'est passé l'ouvrir. Si l'écran affiché n'est plus atteignable — la
+        maquette a été vidée, les règles sont devenues incohérentes — on
+        revient à la dernière étape valide plutôt que de laisser l'utilisateur
+        sur une page qui ne correspond plus à rien.
+        """
+        if self.controller is None:
+            return self.stepper.unlocked
+
+        reachable = self.controller.max_reachable_step()
+        self.stepper.reset_unlock(reachable)
+        if self.current_step > reachable:
+            self._display_step(reachable)
+        return reachable
+
     def show_step(self, index: int):
-        """Affiche une étape, si elle est déverrouillée."""
-        if index > self.stepper.unlocked:
-            self.set_status(self.t("step.locked"), "warn")
+        """Affiche une étape, si elle est accessible."""
+        # Le verrouillage est rafraîchi AVANT de refuser : sans cela, l'étape
+        # « Cheminement » ne s'ouvrait jamais, puisque son déverrouillage
+        # n'avait lieu qu'à la fin de son propre affichage.
+        reachable = self.refresh_steps()
+
+        if index > reachable:
+            reason = ""
+            if self.controller is not None:
+                reason = self.controller.locked_reason(index)
+            self.set_status(reason or self.t("step.locked"), "warn")
             return
 
+        self._display_step(index)
+
+    def _display_step(self, index: int):
+        """Bascule réellement l'affichage, sans revérifier l'accès."""
         self.current_step = index
         for page in self.pages.values():
             page.grid_forget()
@@ -181,9 +215,6 @@ class AppWindow(ctk.CTk):
 
         if self.controller is not None:
             self.controller.on_step_shown(index)
-
-    def unlock_step(self, index: int):
-        self.stepper.unlock_up_to(index)
 
     def set_controller(self, controller):
         self.controller = controller

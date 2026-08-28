@@ -210,19 +210,92 @@ def app():
     window.destroy()
 
 
-class TestApplication:
-    def test_les_quatre_etapes_existent(self, app):
-        assert len(app.pages) == 4
+class TestNavigation:
+    """Accès aux étapes de l'assistant.
 
-    def test_les_etapes_suivantes_sont_verrouillees_au_demarrage(self, app):
-        app.stepper.reset_unlock(0)
+    L'accès se déduit de l'état réel du projet. Une première version le faisait
+    dépendre des écrans déjà visités : l'étape « Cheminement » n'était
+    déverrouillée qu'à la fin de son propre affichage, lequel commençait par
+    refuser d'entrer tant qu'elle n'était pas déverrouillée. Elle était donc
+    inatteignable.
+    """
+
+    @staticmethod
+    def _maquette_chargee(app):
+        app.controller.extraction_summary = {
+            "n_parts": 12,
+            "bounds": (0, 100, 0, 100, 0, 100),
+            "families": {},
+        }
+        app.refresh_steps()
+
+    @staticmethod
+    def _aucune_maquette(app):
+        app.controller.extraction_summary = {}
+        app.refresh_steps()
+
+    def test_sans_maquette_seule_la_premiere_etape_est_ouverte(self, app):
+        self._aucune_maquette(app)
+        assert app.controller.max_reachable_step() == 0
         app.show_step(2)
         assert app.current_step == 0
 
-    def test_deverrouillage_progressif(self, app):
-        app.unlock_step(2)
+    def test_le_motif_du_verrouillage_est_explicite(self, app):
+        self._aucune_maquette(app)
+        app.show_step(2)
+        assert "maquette" in app.lbl_status.cget("text").lower()
+
+    def test_le_cheminement_souvre_des_que_la_maquette_est_chargee(self, app):
+        """Régression : c'est exactement le blocage signalé."""
+        self._maquette_chargee(app)
+        app.show_step(1)
+        assert app.pages[1].validate() == []
         app.show_step(2)
         assert app.current_step == 2
+
+    def test_des_regles_incoherentes_referment_le_cheminement(self, app):
+        self._maquette_chargee(app)
+        app.show_step(1)
+        app.pages[1].f_max.set(5.0)  # maxi < mini
+        app.show_step(2)
+        assert app.current_step == 1
+        assert "maximale" in app.lbl_status.cget("text")
+        app.pages[1].f_max.set(100.0)
+
+    def test_le_bouton_continuer_fait_avancer(self, app):
+        self._maquette_chargee(app)
+        app.show_step(1)
+        app.pages[1]._on_continue()
+        assert app.current_step == 2
+
+    def test_le_bouton_continuer_refuse_des_regles_incoherentes(self, app):
+        self._maquette_chargee(app)
+        app.show_step(1)
+        app.pages[1].f_diameter.set(0.0)
+        app.pages[1]._on_continue()
+        assert app.current_step == 1
+        app.pages[1].f_diameter.set(40.0)
+
+    def test_le_rapport_reste_ferme_sans_cheminement(self, app):
+        self._maquette_chargee(app)
+        assert app.controller.max_reachable_step() == 2
+        app.show_step(3)
+        assert app.current_step != 3
+        assert "cheminement" in app.lbl_status.cget("text").lower()
+
+    def test_le_verrouillage_se_referme_si_letat_regresse(self, app):
+        """Une étape ne doit pas rester ouverte une fois sa condition perdue."""
+        self._maquette_chargee(app)
+        app.show_step(2)
+        assert app.current_step == 2
+        self._aucune_maquette(app)
+        app.show_step(2)
+        assert app.current_step != 2
+
+
+class TestApplication:
+    def test_les_quatre_etapes_existent(self, app):
+        assert len(app.pages) == 4
 
     def test_changement_de_langue_traduit_toutes_les_pages(self, app):
         app.set_language("EN")

@@ -54,6 +54,10 @@ FR: dict[str, str] = {
     "step.report": "Rapport",
     "step.report.sub": "Vérifier et exporter",
     "step.locked": "Terminez l'étape précédente pour accéder à celle-ci.",
+    "step.locked.project": "Chargez d'abord la maquette à l'étape 1.",
+    "step.locked.routing": "Lancez d'abord un cheminement à l'étape 3.",
+    "rules.continue": "Continuer vers le cheminement",
+    "rules.ready": "Règles enregistrées.",
     # -- étape 1 : projet ---------------------------------------------
     "project.title": "1. Charger la maquette numérique",
     "project.intro": (
@@ -256,6 +260,10 @@ EN: dict[str, str] = {
     "step.report": "Report",
     "step.report.sub": "Check and export",
     "step.locked": "Complete the previous step to unlock this one.",
+    "step.locked.project": "Load the mock-up first, at step 1.",
+    "step.locked.routing": "Run a routing first, at step 3.",
+    "rules.continue": "Continue to routing",
+    "rules.ready": "Rules saved.",
     "project.title": "1. Load the digital mock-up",
     "project.intro": (
         "Tell the application where the helicopter parts are. They will be merged into "
