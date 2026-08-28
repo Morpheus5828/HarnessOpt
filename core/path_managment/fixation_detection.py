@@ -105,7 +105,7 @@ def check_and_peel_optimized(clamp_path, env_pcd_fine, env_pcd_coarse, voxel_fin
 
     try:
         icp_fine = o3d.pipelines.registration.registration_icp(
-            clamp_pcd_fine_best, env_pcd_fine, voxel_fine * 1.5, np.eye(4),
+            clamp_pcd_fine_best, env_pcd_fine, voxel_fine * 3.0, np.eye(4),
             o3d.pipelines.registration.TransformationEstimationPointToPoint(),
             o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=50)
         )
@@ -121,7 +121,7 @@ def check_and_peel_optimized(clamp_path, env_pcd_fine, env_pcd_coarse, voxel_fin
         best_strict_fitness = 0.0
         final_strict_transform = np.eye(4)
 
-    is_present = best_strict_fitness >= 0.7
+    is_present = best_strict_fitness >= 0.6
 
     if is_present:
         best_pcd = o3d.geometry.PointCloud()
@@ -187,7 +187,7 @@ def subdiviser_peigne_n_butees(mesh_local, transform_globale, n_butees):
 def run_detection_for_agent(scene_path, clamps_folder, voxel_fine=0.8):
     """Fonction point d'entrée appelée par controller.py."""
     print("\n📡 Initialisation du Radar Open3D (Multi-échelle + Threads Optimisés)...")
-    voxel_coarse = 4.0
+    voxel_coarse = 2.0
     env_mesh = o3d.io.read_triangle_mesh(scene_path)
 
     print(f"🌍 Scan de l'environnement en cours (Fine: {voxel_fine}mm, Coarse: {voxel_coarse}mm)...")
