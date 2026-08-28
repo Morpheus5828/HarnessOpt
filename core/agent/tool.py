@@ -6,6 +6,7 @@ from core.agent.config import _CRABE_GEOMETRY_CACHE
 
 SENSOR_COUNT_DEFAULT = 14
 
+
 def get_rotation_matrix_from_vectors(vec1, vec2):
     a = vec1 / np.linalg.norm(vec1)
     b = vec2 / np.linalg.norm(vec2)
@@ -25,6 +26,10 @@ def get_rotation_matrix_from_vectors(vec1, vec2):
     kmat = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
     return np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c) / (s ** 2))
 
+
+# =========================================================================
+# 🦀 LOGIQUE DES CRABES
+# =========================================================================
 
 def load_crabe_clamp(stl_path, max_check_points=400):
     mesh_clamp = trimesh.load_mesh(stl_path, force='mesh')
@@ -67,6 +72,129 @@ def get_crabe_geometry(stl_path):
     _CRABE_GEOMETRY_CACHE[stl_path] = geometry
     return geometry
 
+
+# =========================================================================
+# 🪮 LOGIQUE DES CLAMPS (PEIGNES)
+# =========================================================================
+
+def extraire_geometrie_pure_clamp(mesh_trimesh):
+    """
+    Extrait les axes parfaits d'après les plans de la CAO (normales)
+    et trouve les encoches via l'analyse de la matière.
+    Spécifique aux peignes (Clamps). Adapté pour Trimesh.
+    """
+    vertices = mesh_trimesh.vertices
+    areas = mesh_trimesh.area_faces
+    normals = mesh_trimesh.face_normals
+
+    # 1. Extraction ultra-robuste des axes CAO via la matrice de covariance
+    C = np.zeros((3, 3))
+    for n, a in zip(normals, areas):
+        C += a * np.outer(n, n)
+
+    _, eigenvectors = np.linalg.eigh(C)
+    R_local = eigenvectors
+
+    proj = vertices @ R_local
+    extents = np.max(proj, axis=0) - np.min(proj, axis=0)
+
+    idx_long = np.argmax(extents)
+    idx_dos = np.argmin(extents)
+    idx_haut = 3 - idx_long - idx_dos
+
+    vec_long = R_local[:, idx_long]
+    vec_haut = R_local[:, idx_haut]
+    vec_dos = R_local[:, idx_dos]
+
+    # Orientation vers le haut des dents
+    coords_H = vertices @ vec_haut
+    if np.mean(coords_H) > (np.min(coords_H) + np.max(coords_H)) / 2.0:
+        vec_haut = -vec_haut
+        coords_H = vertices @ vec_haut
+
+    coords_L = vertices @ vec_long
+
+    # 2. Détection Topologique des encoches
+    h_min, h_max = np.min(coords_H), np.max(coords_H)
+
+    threshold_H = h_max - 0.4 * (h_max - h_min)
+    mask_top = coords_H > threshold_H
+    top_L = coords_L[mask_top]
+
+    L_min, L_max = np.min(coords_L), np.max(coords_L)
+    nb_bins = 200
+    hist, _ = np.histogram(top_L, bins=nb_bins, range=(L_min, L_max))
+
+    is_matter = hist > 0
+
+    gaps_centers_L = []
+    in_gap = False
+    gap_start_idx = 0
+
+    for i in range(nb_bins):
+        if not is_matter[i] and not in_gap:
+            in_gap = True
+            gap_start_idx = i
+        elif is_matter[i] and in_gap:
+            in_gap = False
+            gap_end_idx = i - 1
+            if (gap_end_idx - gap_start_idx) >= (nb_bins * 0.01):
+                center_idx = (gap_start_idx + gap_end_idx) / 2.0
+                center_coord = L_min + (center_idx / nb_bins) * (L_max - L_min)
+                gaps_centers_L.append(center_coord)
+
+    if not gaps_centers_L:
+        gaps_centers_L = [(L_min + L_max) / 2.0]
+
+    hauteur_segment = extents[idx_haut] * 0.90
+
+    coords_D = vertices @ vec_dos
+    d_min = np.min(coords_D)
+    d_max = np.max(coords_D)
+
+    h_center = (h_min + h_max) / 2.0
+
+    return gaps_centers_L, vec_long, vec_haut, vec_dos, d_min, d_max, h_center, hauteur_segment
+
+
+def placer_lignes_dans_encoches_clamp(mesh_trimesh, transform_globale):
+    """
+    Place les lignes avec un décalage de +2mm devant les encoches trouvées
+    pour les fixations de type CLAMP (peigne).
+    Retourne les segments (p_in, p_out, center).
+    """
+    gaps_L_coords, vec_L, vec_H, vec_D, d_min, d_max, h_center, h_segment = extraire_geometrie_pure_clamp(mesh_trimesh)
+
+    R_glob = transform_globale[:3, :3]
+    T_glob = transform_globale[:3, 3]
+
+    passages = []
+
+    # Décalage de 2mm à l'avant du peigne
+    d_placement = d_min - 2.0
+
+    for pos_L in gaps_L_coords:
+        current_center_local = (pos_L * vec_L) + (h_center * vec_H) + (d_placement * vec_D)
+
+        p_bottom_local = current_center_local - (h_segment / 2.0) * vec_H
+        p_top_local = current_center_local + (h_segment / 2.0) * vec_H
+
+        p_bottom_global = (R_glob @ p_bottom_local) + T_glob
+        p_top_global = (R_glob @ p_top_local) + T_glob
+        center_global = (R_glob @ current_center_local) + T_glob
+
+        passages.append({
+            'p_in': p_bottom_global.tolist(),
+            'p_out': p_top_global.tolist(),
+            'center': center_global.tolist()
+        })
+
+    return passages, len(gaps_L_coords)
+
+
+# =========================================================================
+# UTILITAIRES ET CHEMINS
+# =========================================================================
 
 def compute_full_tangents(waypoints):
     tangents = np.zeros_like(waypoints)
@@ -154,22 +282,42 @@ def is_crabe_clash_free(surface_position, x_axis, y_axis, normal, crabe_geometry
     return not np.any(inside & (dist > tolerance))
 
 
-def place_crabes_greedy(waypoints, eligible, min_spacing, is_valid=None):
+def place_crabes_greedy(waypoints, eligible, min_spacing, existing_positions=None, is_valid=None):
     seg_lengths = np.linalg.norm(np.diff(waypoints, axis=0), axis=1) if len(waypoints) > 1 else np.array([])
     cum_length = np.insert(np.cumsum(seg_lengths), 0, 0.0) if len(seg_lengths) > 0 else np.zeros(len(waypoints))
     placed_idx = []
-    last_len = -min_spacing
+
+    # Le point de départ (A) compte comme un ancrage initial
+    last_anchor_len = 0.0
+
     for i in range(len(waypoints)):
-        if eligible[i] and (cum_length[i] - last_len) >= min_spacing:
+        # 1. Vérifier si l'on passe sur une fixation CAO scannée (p_in / p_out)
+        is_existing_anchor = False
+        if existing_positions is not None and len(existing_positions) > 0:
+            dist_to_existing = np.linalg.norm(existing_positions - waypoints[i], axis=1)
+            if np.min(dist_to_existing) < 30.0:  # Rayon d'exclusion (3 cm autour de la fixation)
+                is_existing_anchor = True
+
+        # Si on survole une fixation existante, ON NE POSE RIEN et on réinitialise le compteur des 25 cm
+        if is_existing_anchor:
+            last_anchor_len = cum_length[i]
+            continue
+
+        # 2. Règle des 25 cm : Si on a parcouru >= min_spacing depuis le dernier ancrage
+        if eligible[i] and (cum_length[i] - last_anchor_len) >= min_spacing:
             if is_valid is not None and not is_valid(i):
                 continue
+
             placed_idx.append(i)
-            last_len = cum_length[i]
+            # On valide la pose du crabe, il devient notre nouvel ancrage
+            last_anchor_len = cum_length[i]
+
     return placed_idx
 
 
 def compute_crabes(waypoints, local_pq, mesh, crabe_geometry, normal_cos_threshold, surface_tolerance,
-                   straightness_tolerance, min_spacing, max_clearance=None, clash_tolerance=0.5):
+                   straightness_tolerance, min_spacing, max_clearance=None, clash_tolerance=0.5,
+                   existing_positions=None):
     if crabe_geometry is None or len(waypoints) < 2:
         return [], np.zeros(len(waypoints), dtype=bool), {}
 
@@ -187,7 +335,9 @@ def compute_crabes(waypoints, local_pq, mesh, crabe_geometry, normal_cos_thresho
             clash_rejects[0] += 1
         return ok
 
-    placed_idx = place_crabes_greedy(waypoints, eligible, min_spacing, is_valid=_clash_ok)
+    placed_idx = place_crabes_greedy(waypoints, eligible, min_spacing,
+                                     existing_positions=existing_positions,
+                                     is_valid=_clash_ok)
     diag["clash_rejets"] = clash_rejects[0]
 
     crabes = []
@@ -202,23 +352,26 @@ def compute_crabes(waypoints, local_pq, mesh, crabe_geometry, normal_cos_thresho
     return crabes, eligible, diag
 
 
-
 def resample_curve(points, num_points):
+    points = np.asarray(points, dtype=np.float32)
     if len(points) < 2:
         return points
+
     diffs = np.diff(points, axis=0)
     segment_lengths = np.linalg.norm(diffs, axis=1)
     cum_dist = np.insert(np.cumsum(segment_lengths), 0, 0.0)
     total_dist = cum_dist[-1]
-    if total_dist == 0:
+
+    if total_dist <= 1e-6:
         return np.tile(points[0], (num_points, 1))
-    new_dist = np.linspace(0, total_dist, num_points)
-    new_points = np.zeros((num_points, 3))
+
+    new_dist = np.linspace(0.0, total_dist, int(num_points), dtype=np.float32)
+
+    new_points = np.zeros((num_points, 3), dtype=np.float32)
     for i in range(3):
         new_points[:, i] = np.interp(new_dist, cum_dist, points[:, i])
-    return new_points.astype(np.float32)
 
-
+    return new_points
 
 
 def generate_dense_waypoints(start, goal, num_points, mesh=None, intermediate_points=None):
@@ -252,17 +405,33 @@ def generate_dense_waypoints(start, goal, num_points, mesh=None, intermediate_po
             s_pt = full_path_nodes[i]
             e_pt = full_path_nodes[i + 1]
 
-            _, s_idx = mesh.kdtree.query(s_pt)
-            _, e_idx = mesh.kdtree.query(e_pt)
+            # 🔥 HEURISTIQUE ANTI-RAMPAGE : Si on relie deux boules d'une MÊME encoche,
+            # on force une LIGNE DROITE EN L'AIR au lieu de coller à la surface du peigne !
+            is_air_gap = False
+            if intermediate_points is not None and len(intermediate_points) > 0:
+                dist_nodes = np.linalg.norm(s_pt - e_pt)
+                if dist_nodes < 150.0:  # Les points d'un peigne sont forcément proches
+                    # On vérifie que les deux points sont bien nos boules intermédiaires
+                    s_is_inter = any(np.linalg.norm(s_pt - np.array(p)) < 1e-3 for p in intermediate_points)
+                    e_is_inter = any(np.linalg.norm(e_pt - np.array(p)) < 1e-3 for p in intermediate_points)
+                    if s_is_inter and e_is_inter:
+                        is_air_gap = True
 
-            try:
-                # On essaie de coller à la surface
-                geo_path = pv_mesh.geodesic(s_idx, e_idx)
-                segment_pts = geo_path.points
-            except Exception :
-                # ⚠️ Si la surface est coupée (déconnectée), on fait un saut en ligne droite locale !
-                print(f"⚠️ Sceau géodésique au tronçon {i+1} (Régions déconnectées), pont en ligne droite activé.")
-                segment_pts = np.linspace(s_pt, e_pt, 10, dtype=np.float32)
+            if is_air_gap:
+                # Saut direct et tout droit dans l'encoche, on évite le calcul géodésique !
+                nb_steps = max(5, int(np.linalg.norm(s_pt - e_pt) / 2))
+                segment_pts = np.linspace(s_pt, e_pt, nb_steps, dtype=np.float32)
+            else:
+                _, s_idx = mesh.kdtree.query(s_pt)
+                _, e_idx = mesh.kdtree.query(e_pt)
+
+                try:
+                    # On essaie de coller à la surface pour le reste du trajet
+                    geo_path = pv_mesh.geodesic(s_idx, e_idx)
+                    segment_pts = geo_path.points
+                except Exception:
+                    # ⚠️ Si la surface est coupée, pont en ligne droite activé.
+                    segment_pts = np.linspace(s_pt, e_pt, 10, dtype=np.float32)
 
             # On évite de dupliquer le point de jonction entre les segments
             if len(all_path_points) > 0:
@@ -372,3 +541,67 @@ def scan_lookahead_radar(points, tangents, local_pq, base_radius, d_soft, n_prob
     ahead_ratio = (close_counts / n_probes).astype(np.float32)
     return ahead_ratio
 
+
+# =========================================================================
+# OUTILS ANTI-COLLISION ET LISSAGE ADAPTATIF
+# =========================================================================
+
+def compute_collision_penalties(waypoints, mesh, config, local_pq=None):
+    """
+    Calcule les pénalités de collisions exactes (segment-triangle)
+    et les pénétrations dans le volume du câble.
+    """
+    n_crossings, crossing_mask = count_segment_face_crossings(waypoints, mesh)
+
+    test_pts = get_segment_test_points(waypoints, steps=config.get("segment_test_steps", 10))
+
+    # Prise en compte de ProximityQuery (3 retours) ou KDTree (2 retours)
+    if local_pq is not None:
+        _, dists, _ = local_pq.on_surface(test_pts)
+    else:
+        dists, _ = mesh.kdtree.query(test_pts)  # <-- CORRECTION : 2 valeurs unpacked
+
+    min_clearance = config.get("tube_radius", 6.0) + config.get("min_margin", 10.0)
+    tube_violations = np.sum(dists < min_clearance)
+
+    penalty = (n_crossings * config.get("segment_violation_penalty", 200.0)) + (tube_violations * 10.0)
+    return penalty, crossing_mask
+
+
+def apply_spatial_smoothing(action_displacements, smoothing_factor=0.8):
+    """
+    Applique un filtre laplacien 1D pour lisser les actions
+    et éviter l'effet "dents de scie".
+    """
+    smoothed = np.copy(action_displacements)
+    smoothed[1:-1] = (
+            smoothing_factor * action_displacements[1:-1] +
+            ((1.0 - smoothing_factor) / 2.0) * (action_displacements[:-2] + action_displacements[2:])
+    )
+    return smoothed
+
+
+def adaptively_refine_trajectory(waypoints, crossing_mask, collision_streaks, config):
+    """
+    Insère un point milieu sur les segments bloqués de manière persistante.
+    """
+    new_waypoints = []
+    n_pts = len(waypoints)
+    max_pts = config.get("max_points", 150)
+    threshold = config.get("adaptive_insert_streak_threshold", 8)
+
+    for i in range(n_pts - 1):
+        new_waypoints.append(waypoints[i])
+
+        if i < len(crossing_mask) and crossing_mask[i]:
+            collision_streaks[i] = collision_streaks.get(i, 0) + 1
+        else:
+            collision_streaks[i] = 0
+
+        if collision_streaks.get(i, 0) >= threshold and len(new_waypoints) < max_pts:
+            mid_point = 0.5 * (waypoints[i] + waypoints[i + 1])
+            new_waypoints.append(mid_point)
+            collision_streaks[i] = 0
+
+    new_waypoints.append(waypoints[-1])
+    return np.array(new_waypoints, dtype=np.float32)
