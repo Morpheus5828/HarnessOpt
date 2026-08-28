@@ -16,6 +16,7 @@ from trimesh.proximity import ProximityQuery
 import time
 import threading
 import traceback
+import torch
 from scipy.spatial import KDTree
 
 from core.agent.agent import *
@@ -52,6 +53,35 @@ shared_state = {
     "algos": {},
     "config": CONFIG,
 }
+
+# ⚡ Réglage CPU : OMP_NUM_THREADS/MKL_NUM_THREADS/... sont bridés à 1 en haut de ce fichier,
+# volontairement, pour éviter que chacun des agents ci-dessus (qui tournent déjà chacun dans
+# son propre thread, en parallèle) ne lance EN PLUS son propre pool de threads BLAS/OMP par
+# dessus -> sur-souscription (N_agents x N_threads_BLAS threads pour N_coeurs coeurs), qui
+# ralentit tout au lieu d'accélérer. Mais les laisser bloqués à 1 pour toujours gâche la
+# puissance CPU dispo sur une machine avec plus de coeurs que d'agents. On calcule donc un
+# budget de threads par agent (coeurs CPU / nb d'agents) et on relève la limite en
+# conséquence : via threadpoolctl (agit sur les pools BLAS déjà chargés, contrairement aux
+# variables d'environnement qui ne comptent qu'à l'import) pour numpy/trimesh/scipy, et via
+# torch.set_num_threads (réglable à tout moment) pour PyTorch.
+_N_AGENTS = max(1, len(benchmark_algos))
+_CPU_COUNT = os.cpu_count() or 4
+THREADS_PER_AGENT = max(1, _CPU_COUNT // _N_AGENTS)
+
+try:
+    torch.set_num_threads(THREADS_PER_AGENT)
+except Exception:
+    pass
+
+try:
+    import threadpoolctl
+    threadpoolctl.threadpool_limits(limits=THREADS_PER_AGENT)
+    print(f"⚙️ {_N_AGENTS} agents sur {_CPU_COUNT} coeurs CPU détectés -> {THREADS_PER_AGENT} thread(s) "
+          f"BLAS/PyTorch par agent (au lieu du plancher de sécurité à 1).")
+except ImportError:
+    print(f"⚙️ {_N_AGENTS} agents détectés sur {_CPU_COUNT} coeurs CPU, mais 'threadpoolctl' n'est pas "
+          f"installé -> les threads BLAS/OMP restent au plancher de sécurité (1). "
+          f"`pip install threadpoolctl` pour exploiter jusqu'à {THREADS_PER_AGENT} thread(s)/agent.")
 
 
 def algo_worker(
@@ -129,133 +159,137 @@ def algo_worker(
             shape_changed_this_iter = False
             with data_lock:
                 playing = shared_state["is_playing"]
-                cfg = shared_state["config"]
-
-                safe_margin = cfg["min_margin"]
-                d_soft = cfg["max_margin"]
-                max_iter = cfg["iterations"]
-                b_margin = cfg.get("min_border_margin", 35.0)
-                max_bend = cfg.get("min_bend_angle", 0.20)
-
-                sensor_count = int(cfg.get("sensor_count", SENSOR_COUNT_DEFAULT))
-                sensor_weight = cfg.get("sensor_weight", 20.0)
-                sensor_void_penalty = cfg.get("sensor_void_penalty", 80.0)
-                sensor_void_ratio_threshold = cfg.get("sensor_void_ratio_threshold", 0.35)
-                sensor_push_factor = cfg.get("sensor_push_factor", 1.5)
-                hard_min_clearance = safe_margin * cfg.get("hard_min_clearance_factor", 0.5)
-                hard_max_clearance = cfg.get("hard_max_clearance", 100.0)
-
-                wide_sensor_radius_factor = cfg.get("wide_sensor_radius_factor", 3.0)
-                flatness_weight = cfg.get("flatness_weight", 15.0)
-                flatness_penalty = cfg.get("flatness_penalty", 40.0)
-                flatness_ratio_threshold = cfg.get("flatness_ratio_threshold", 0.5)
-
-                lookahead_probes = int(cfg.get("lookahead_probes", 3))
-                lookahead_factor = cfg.get("lookahead_factor", 4.0)
-                lookahead_weight = cfg.get("lookahead_weight", 15.0)
-                lookahead_void_penalty = cfg.get("lookahead_void_penalty", 60.0)
-                lookahead_void_ratio_threshold = cfg.get("lookahead_void_ratio_threshold", 0.34)
-                lookahead_push_factor = cfg.get("lookahead_push_factor", 1.5)
-
-                adaptive_insert_streak_threshold = cfg.get("adaptive_insert_streak_threshold", 8)
-                adaptive_insert_max_per_event = int(cfg.get("adaptive_insert_max_per_event", 4))
-                segment_violation_penalty = cfg.get("segment_violation_penalty", 15.0)
-                segment_test_steps = int(cfg.get("segment_test_steps", 6))
-                max_points_cfg = int(cfg.get("max_points", 150))
-
-                regression_tolerance = cfg.get("regression_tolerance", 2)
-                regression_patience = cfg.get("regression_patience", 15)
-                regression_noise_cut = cfg.get("regression_noise_cut", 0.5)
-
-                band_width = max(d_soft - safe_margin, 1e-3)
-                max_shift_band_multiplier = cfg.get("max_shift_band_multiplier", 3.0)
-                max_step_band_multiplier = cfg.get("max_step_band_multiplier", 6.0)
-
-                laplace_weight = cfg.get("laplace_weight", 20.0)
-                smooth_bonus_weight = cfg.get("smooth_bonus_weight", 60.0)
-                smooth_sharp_penalty = cfg.get("smooth_sharp_penalty", 150.0)
-                smoothing_iterations = int(cfg.get("smoothing_iterations", 6))
-                smoothing_blend = float(np.clip(cfg.get("smoothing_blend", 0.65), 0.0, 0.95))
-                disp_spatial_smoothing = float(np.clip(cfg.get("disp_spatial_smoothing", 0.8), 0.0, 1.0))
-                success_noise_streak = int(cfg.get("success_noise_streak", 20))
-                freeze_success_streak = max(1, int(cfg.get("freeze_success_streak", 30)))
-                stagnation_freeze_start = int(cfg.get("stagnation_freeze_start", 80))
-                corner_cut_cos_threshold = cfg.get("corner_cut_cos_threshold", 0.87)
-                corner_cut_streak_threshold = cfg.get("corner_cut_streak_threshold", 8)
-                corner_cut_max_per_event = int(cfg.get("corner_cut_max_per_event", 2))
-                crabe_focus_noise_floor = cfg.get("crabe_focus_noise_floor", 0.15)
-                patience_mult = int(cfg.get("crabe_focus_patience_mult", 4)) if crabe_focus else 1
-
-                if role == "explorer":
-                    local_max_shift = cfg["local_max_shift"] * 1.5
-                    noise_decay = cfg.get("crabe_focus_noise_decay", 0.9985) if crabe_focus \
-                        else cfg.get("exploration_decay", 0.95)
-                    batch_size_gpu = min(cfg.get("batch_size", 256), 256)
-                    train_steps_gpu = 1
-                    step_momentum = float(np.clip(cfg.get("step_momentum_explorer", 0.3), 0.0, 0.95))
-                else:
-                    local_max_shift = cfg["local_max_shift"] * 0.7
-                    noise_decay = 0.95
-                    batch_size_gpu = cfg.get("batch_size", 256)
-                    train_steps_gpu = 3
-                    step_momentum = float(np.clip(cfg.get("step_momentum_optimizer", 0.7), 0.0, 0.95))
-
-                local_max_shift = min(local_max_shift, band_width * max_shift_band_multiplier)
-                max_total_step = band_width * max_step_band_multiplier
-
-                crabe_stl_path = cfg.get("crabe_stl_path", "")
-                crabe_geometry = get_crabe_geometry(crabe_stl_path)
-                crabe_normal_cos_threshold = cfg.get("crabe_normal_cos_threshold", 0.94)
-                crabe_surface_tolerance = cfg.get("crabe_surface_tolerance", 3.0)
-                crabe_straightness_tolerance = cfg.get("crabe_straightness_tolerance", 2.0)
-                crabe_min_spacing = cfg.get("crabe_min_spacing", 250.0)
-                crabe_clash_tolerance = cfg.get("crabe_clash_tolerance", 0.5)
-                crabe_reward_weight = cfg.get("crabe_reward_weight", 10.0)
-                crabe_count_bonus_weight = cfg.get("crabe_count_bonus_weight", 4.0)
-                crabe_focus_multiplier = cfg.get("crabe_focus_multiplier", 10.0)
-
-                crabe_max_clearance = cfg.get("crabe_max_clearance", 0.0)
-                if not crabe_max_clearance or crabe_max_clearance <= 0:
-                    clip_height = crabe_geometry["height"] if crabe_geometry else 0.0
-                    crabe_max_clearance = max(d_soft, clip_height) + crabe_surface_tolerance
-                crabe_debug_every = int(cfg.get("crabe_debug_every", 200))
-
+                # 📸 Copie privée de la config : le verrou n'est tenu que pour CES quelques
+                # lectures. Tout le dépouillement ci-dessous (dizaines de cfg.get(...)) se fait
+                # ensuite sur cette copie, SANS verrou -> beaucoup moins de contention entre les
+                # threads d'agent qui, sinon, se bloquaient tous mutuellement à chaque itération
+                # pour une simple lecture de config qui ne change quasiment jamais.
+                cfg = dict(shared_state["config"])
                 current_iter = shared_state["algos"][algo_name]["iteration"]
                 wp_current = shared_state["algos"][algo_name]["waypoints"].copy()
                 done = shared_state["algos"][algo_name]["done"]
                 prev_disp = shared_state["algos"][algo_name].get("prev_disp", None)
 
-                if current_iter < last_iter:
-                    exploration_noise = cfg["exploration_noise_start"]
-                    local_pts = int(cfg["initial_points"])
+            safe_margin = cfg["min_margin"]
+            d_soft = cfg["max_margin"]
+            max_iter = cfg["iterations"]
+            b_margin = cfg.get("min_border_margin", 35.0)
+            max_bend = cfg.get("min_bend_angle", 0.20)
 
-                    # Même logique qu'au démarrage : le contrôleur vient d'écrire le nouveau
-                    # chemin de départ dans shared_state["waypoints"] juste avant de remettre
-                    # l'itération à 0 (wp_current, lu juste au-dessus, EST déjà ce chemin) ->
-                    # on le réutilise au lieu de relancer un calcul géodésique en concurrence
-                    # avec tous les autres threads d'agent au moment du reset.
-                    original_waypoints = wp_current.copy()
-                    success_streak = 0
-                    wp_current = original_waypoints.copy()
-                    prev_disp = None
-                    seg_streak = None
-                    sharp_streak = None
-                    shape_changed_this_iter = True
-                    best_collisions = None
-                    best_reward = None
-                    iters_since_best = 0
-                    insert_backoff = 1.0
-                    last_insert_event_iter = None
-                    best_at_last_insert = None
-                    best_waypoints = None
-                    best_original_waypoints = None
-                    best_local_pts = None
-                    regress_streak = 0
-                    locked_crabe_indices = set()
-                    locked_crabe_data = {}
-                    best_locked_crabe_indices = set()
-                    best_locked_crabe_data = {}
-                last_iter = current_iter
+            sensor_count = int(cfg.get("sensor_count", SENSOR_COUNT_DEFAULT))
+            sensor_weight = cfg.get("sensor_weight", 20.0)
+            sensor_void_penalty = cfg.get("sensor_void_penalty", 80.0)
+            sensor_void_ratio_threshold = cfg.get("sensor_void_ratio_threshold", 0.35)
+            sensor_push_factor = cfg.get("sensor_push_factor", 1.5)
+            hard_min_clearance = safe_margin * cfg.get("hard_min_clearance_factor", 0.5)
+            hard_max_clearance = cfg.get("hard_max_clearance", 100.0)
+
+            wide_sensor_radius_factor = cfg.get("wide_sensor_radius_factor", 3.0)
+            flatness_weight = cfg.get("flatness_weight", 15.0)
+            flatness_penalty = cfg.get("flatness_penalty", 40.0)
+            flatness_ratio_threshold = cfg.get("flatness_ratio_threshold", 0.5)
+
+            lookahead_probes = int(cfg.get("lookahead_probes", 3))
+            lookahead_factor = cfg.get("lookahead_factor", 4.0)
+            lookahead_weight = cfg.get("lookahead_weight", 15.0)
+            lookahead_void_penalty = cfg.get("lookahead_void_penalty", 60.0)
+            lookahead_void_ratio_threshold = cfg.get("lookahead_void_ratio_threshold", 0.34)
+            lookahead_push_factor = cfg.get("lookahead_push_factor", 1.5)
+
+            adaptive_insert_streak_threshold = cfg.get("adaptive_insert_streak_threshold", 8)
+            adaptive_insert_max_per_event = int(cfg.get("adaptive_insert_max_per_event", 4))
+            segment_violation_penalty = cfg.get("segment_violation_penalty", 15.0)
+            segment_test_steps = int(cfg.get("segment_test_steps", 6))
+            max_points_cfg = int(cfg.get("max_points", 150))
+
+            regression_tolerance = cfg.get("regression_tolerance", 2)
+            regression_patience = cfg.get("regression_patience", 15)
+            regression_noise_cut = cfg.get("regression_noise_cut", 0.5)
+
+            band_width = max(d_soft - safe_margin, 1e-3)
+            max_shift_band_multiplier = cfg.get("max_shift_band_multiplier", 3.0)
+            max_step_band_multiplier = cfg.get("max_step_band_multiplier", 6.0)
+
+            laplace_weight = cfg.get("laplace_weight", 20.0)
+            smooth_bonus_weight = cfg.get("smooth_bonus_weight", 60.0)
+            smooth_sharp_penalty = cfg.get("smooth_sharp_penalty", 150.0)
+            smoothing_iterations = int(cfg.get("smoothing_iterations", 6))
+            smoothing_blend = float(np.clip(cfg.get("smoothing_blend", 0.65), 0.0, 0.95))
+            disp_spatial_smoothing = float(np.clip(cfg.get("disp_spatial_smoothing", 0.8), 0.0, 1.0))
+            success_noise_streak = int(cfg.get("success_noise_streak", 20))
+            freeze_success_streak = max(1, int(cfg.get("freeze_success_streak", 30)))
+            stagnation_freeze_start = int(cfg.get("stagnation_freeze_start", 80))
+            corner_cut_cos_threshold = cfg.get("corner_cut_cos_threshold", 0.87)
+            corner_cut_streak_threshold = cfg.get("corner_cut_streak_threshold", 8)
+            corner_cut_max_per_event = int(cfg.get("corner_cut_max_per_event", 2))
+            crabe_focus_noise_floor = cfg.get("crabe_focus_noise_floor", 0.15)
+            patience_mult = int(cfg.get("crabe_focus_patience_mult", 4)) if crabe_focus else 1
+
+            if role == "explorer":
+                local_max_shift = cfg["local_max_shift"] * 1.5
+                noise_decay = cfg.get("crabe_focus_noise_decay", 0.9985) if crabe_focus \
+                    else cfg.get("exploration_decay", 0.95)
+                batch_size_gpu = min(cfg.get("batch_size", 256), 256)
+                train_steps_gpu = 1
+                step_momentum = float(np.clip(cfg.get("step_momentum_explorer", 0.3), 0.0, 0.95))
+            else:
+                local_max_shift = cfg["local_max_shift"] * 0.7
+                noise_decay = 0.95
+                batch_size_gpu = cfg.get("batch_size", 256)
+                train_steps_gpu = 3
+                step_momentum = float(np.clip(cfg.get("step_momentum_optimizer", 0.7), 0.0, 0.95))
+
+            local_max_shift = min(local_max_shift, band_width * max_shift_band_multiplier)
+            max_total_step = band_width * max_step_band_multiplier
+
+            crabe_stl_path = cfg.get("crabe_stl_path", "")
+            crabe_geometry = get_crabe_geometry(crabe_stl_path)
+            crabe_normal_cos_threshold = cfg.get("crabe_normal_cos_threshold", 0.94)
+            crabe_surface_tolerance = cfg.get("crabe_surface_tolerance", 3.0)
+            crabe_straightness_tolerance = cfg.get("crabe_straightness_tolerance", 2.0)
+            crabe_min_spacing = cfg.get("crabe_min_spacing", 250.0)
+            crabe_clash_tolerance = cfg.get("crabe_clash_tolerance", 0.5)
+            crabe_reward_weight = cfg.get("crabe_reward_weight", 10.0)
+            crabe_count_bonus_weight = cfg.get("crabe_count_bonus_weight", 4.0)
+            crabe_focus_multiplier = cfg.get("crabe_focus_multiplier", 10.0)
+
+            crabe_max_clearance = cfg.get("crabe_max_clearance", 0.0)
+            if not crabe_max_clearance or crabe_max_clearance <= 0:
+                clip_height = crabe_geometry["height"] if crabe_geometry else 0.0
+                crabe_max_clearance = max(d_soft, clip_height) + crabe_surface_tolerance
+            crabe_debug_every = int(cfg.get("crabe_debug_every", 200))
+
+            if current_iter < last_iter:
+                exploration_noise = cfg["exploration_noise_start"]
+                local_pts = int(cfg["initial_points"])
+
+                # Même logique qu'au démarrage : le contrôleur vient d'écrire le nouveau
+                # chemin de départ dans shared_state["waypoints"] juste avant de remettre
+                # l'itération à 0 (wp_current, lu juste au-dessus, EST déjà ce chemin) ->
+                # on le réutilise au lieu de relancer un calcul géodésique en concurrence
+                # avec tous les autres threads d'agent au moment du reset.
+                original_waypoints = wp_current.copy()
+                success_streak = 0
+                wp_current = original_waypoints.copy()
+                prev_disp = None
+                seg_streak = None
+                sharp_streak = None
+                shape_changed_this_iter = True
+                best_collisions = None
+                best_reward = None
+                iters_since_best = 0
+                insert_backoff = 1.0
+                last_insert_event_iter = None
+                best_at_last_insert = None
+                best_waypoints = None
+                best_original_waypoints = None
+                best_local_pts = None
+                regress_streak = 0
+                locked_crabe_indices = set()
+                locked_crabe_data = {}
+                best_locked_crabe_indices = set()
+                best_locked_crabe_data = {}
+            last_iter = current_iter
 
             if not playing or done or current_iter >= max_iter:
                 time.sleep(0.01)
@@ -381,13 +415,16 @@ def algo_worker(
                 if prev_disp is not None and prev_disp.shape == total_disp.shape:
                     total_disp = step_momentum * prev_disp + (1.0 - step_momentum) * total_disp
 
-                if disp_spatial_smoothing > 0.0 and len(danger_indices) > 1:
+                """if disp_spatial_smoothing > 0.0 and len(danger_indices) > 1:
                     full_disp = np.zeros_like(wp_current)
                     full_disp[danger_indices] = total_disp
                     neighbor_mean = (full_disp[:-2] + full_disp[2:]) / 2.0
                     full_disp[1:-1] = (1.0 - disp_spatial_smoothing) * full_disp[1:-1] + \
                                       disp_spatial_smoothing * neighbor_mean
-                    total_disp = full_disp[danger_indices]
+                    total_disp = full_disp[danger_indices]"""
+
+                if disp_spatial_smoothing > 0.0 and len(danger_indices) > 1:
+                    total_disp = apply_spatial_smoothing(total_disp, smoothing_factor=disp_spatial_smoothing)
 
                 freeze_ratio = success_streak / float(freeze_success_streak * patience_mult)
 
@@ -447,7 +484,7 @@ def algo_worker(
                 candidate_full = wp_current.copy()
                 candidate_full[danger_indices] = proposed_wps
 
-                if segment_violation_penalty > 0 and len(candidate_full) > 1:
+                """if segment_violation_penalty > 0 and len(candidate_full) > 1:
                     seg_test_pts = get_segment_test_points(candidate_full, steps=segment_test_steps)
                     with geom_lock:
                         _, seg_test_dist, seg_test_faces = local_pq.on_surface(seg_test_pts)
@@ -462,6 +499,16 @@ def algo_worker(
 
                     viol_fraction = viol_per_point[danger_indices] / float(2 * segment_test_steps)
                     R_tunnel = -segment_violation_penalty * viol_fraction
+                else:
+                    R_tunnel = np.zeros(len(danger_indices), dtype=np.float32)"""
+
+                if cfg.get("segment_violation_penalty", 0) > 0 and len(candidate_full) > 1:
+                    with geom_lock:
+                        tunnel_penalty, crossing_mask = compute_collision_penalties(
+                            candidate_full, mesh, cfg, local_pq=local_pq
+                        )
+
+                    R_tunnel = -tunnel_penalty / max(1, len(danger_indices))
                 else:
                     R_tunnel = np.zeros(len(danger_indices), dtype=np.float32)
 
@@ -564,7 +611,7 @@ def algo_worker(
 
                 replay_buffer.add(obs_batch, actions_batch, next_obs_batch, rewards_batch)
 
-                if replay_buffer.size > 256:
+                if replay_buffer.size > 256 and current_iter % 5 == 0:
                     for _ in range(train_steps_gpu):
                         agent.train(replay_buffer, batch_size=256)
 
@@ -662,7 +709,7 @@ def algo_worker(
             # ==========================================================
             # 🧬 RAFFINEMENT ADAPTATIF
             # ==========================================================
-            max_points_reached_msg = ""
+            """max_points_reached_msg = ""
             n_segments = len(smoothed_waypoints) - 1
             if n_segments > 0:
                 viol_per_test = (ins_test | (distances_test < safe_margin)).reshape(n_segments, -1)
@@ -743,6 +790,136 @@ def algo_worker(
                             locked_crabe_indices = {(l - 1 if l > i else l) for l in locked_crabe_indices}
                             locked_crabe_data = {(l - 1 if l > i else l): d
                                                  for l, d in locked_crabe_data.items()}
+                    if picked:
+                        seg_streak = None
+                        local_pts = len(smoothed_waypoints)
+                        prev_disp = None
+                        shape_changed_this_iter = True"""
+
+            # ==========================================================
+            # 🧬 RAFFINEMENT ADAPTATIF (VERSION CORRIGÉE & SÉCURISÉE)
+            # ==========================================================
+            max_points_reached_msg = ""
+            n_segments = len(smoothed_waypoints) - 1
+
+            if n_segments > 0:
+                # 1. Analyse des collisions par segment (échantillonnage + traversées exactes)
+                viol_per_test = (ins_test | (distances_test < safe_margin)).reshape(n_segments, -1)
+                segment_violation = viol_per_test.any(axis=1)
+
+                deep_per_test = (ins_test | (distances_test < hard_min_clearance)).reshape(n_segments, -1)
+
+                # Prise en compte explicite de crossing_mask (traversée exacte de triangle)
+                segment_hard_violation = deep_per_test.any(axis=1)
+                if crossing_mask is not None and len(crossing_mask) == n_segments:
+                    segment_hard_violation |= crossing_mask
+
+                # 2. Accumulation des streaks de collision
+                if seg_streak is None or len(seg_streak) != n_segments:
+                    seg_streak = np.zeros(n_segments, dtype=np.float32)
+
+                seg_streak = np.where(
+                    segment_violation | segment_hard_violation,
+                    seg_streak + 1.0,
+                    np.maximum(seg_streak - 2.0, 0.0)
+                )
+
+                # 3. Identification des segments bloqués nécessitant un ajout de point
+                violating_idx = np.where(seg_streak > adaptive_insert_streak_threshold * insert_backoff)[0]
+                budget = max_points_cfg - len(smoothed_waypoints)
+
+                # A. CAS 1 : INSERTION DE NOUVEAUX POINTS
+                if len(violating_idx) > 0 and budget > 0 and regress_streak == 0:
+                    n_insert = min(budget, adaptive_insert_max_per_event)
+                    ranked = violating_idx[np.argsort(-seg_streak[violating_idx])][:n_insert]
+
+                    # Insertion en partant de la fin pour ne pas fausser les index pendant la boucle
+                    for seg_idx in np.sort(ranked)[::-1]:
+                        mid_point = (smoothed_waypoints[seg_idx] + smoothed_waypoints[seg_idx + 1]) / 2.0
+
+                        # Reprojection géométrique du point au-dessus de la surface
+                        with geom_lock:
+                            mid_closest, mid_dist, mid_face = local_pq.on_surface(mid_point[None, :])
+
+                        mid_normal = mesh.face_normals[mid_face[0]]
+                        mid_vec = mid_point - mid_closest[0]
+                        mid_norm = np.linalg.norm(mid_vec)
+
+                        mid_inside = (mid_norm < 1e-8) or (np.dot(mid_vec, mid_normal) < 0)
+                        mid_dir = mid_normal if mid_inside else (mid_vec / (mid_norm + 1e-8))
+
+                        shift = (mid_closest[0] + mid_dir * ideal_target) - mid_point
+                        shift_norm = np.linalg.norm(shift)
+
+                        if shift_norm > max_total_step:
+                            shift = shift * (max_total_step / shift_norm)
+
+                        new_point = (mid_point + shift).astype(smoothed_waypoints.dtype)
+
+                        # Insertion dans les trajectoires
+                        smoothed_waypoints = np.insert(smoothed_waypoints, seg_idx + 1, new_point, axis=0)
+
+                        new_origin_point = (original_waypoints[seg_idx] + original_waypoints[seg_idx + 1]) / 2.0
+                        original_waypoints = np.insert(original_waypoints, seg_idx + 1, new_origin_point, axis=0)
+
+                        # Mise à jour des index des fixations/crabes verrouillés
+                        if crabe_focus and locked_crabe_indices:
+                            shifted_indices = set()
+                            shifted_data = {}
+                            for lidx in locked_crabe_indices:
+                                new_lidx = lidx + 1 if lidx >= seg_idx + 1 else lidx
+                                shifted_indices.add(new_lidx)
+                                shifted_data[new_lidx] = locked_crabe_data[lidx]
+                            locked_crabe_indices = shifted_indices
+                            locked_crabe_data = shifted_data
+
+                    # Reset des états post-insertion
+                    seg_streak = None
+                    local_pts = len(smoothed_waypoints)
+                    prev_disp = None
+                    success_streak = 0
+                    shape_changed_this_iter = True
+                    last_insert_event_iter = current_iter
+                    best_at_last_insert = best_collisions
+
+                elif len(violating_idx) > 0 and budget <= 0:
+                    max_points_reached_msg = f" ⚠️ max_points({max_points_cfg}) atteint, encore {len(violating_idx)} segment(s) en collision"
+
+                # B. CAS 2 : NETTOYAGE / SUPPRESSION DE POINTS INUTILES SI LE BUDGET EST SERRE
+                need_budget = (len(violating_idx) > 0 and budget < adaptive_insert_max_per_event) or \
+                              (len(smoothed_waypoints) > 0.9 * max_points_cfg)
+
+                if need_budget and not shape_changed_this_iter and len(smoothed_waypoints) > 8:
+                    # Calcul de la déviation géométrique (alignement local)
+                    deviation = np.linalg.norm(
+                        smoothed_waypoints[1:-1] - (smoothed_waypoints[:-2] + smoothed_waypoints[2:]) / 2.0,
+                        axis=1
+                    )
+                    clean_seg = ~segment_violation
+                    removable = clean_seg[:-1] & clean_seg[1:] & (deviation < band_width * 0.2)
+                    candidates = np.where(removable)[0] + 1
+
+                    # Protection des fixations verrouillées
+                    if crabe_focus and locked_crabe_indices:
+                        candidates = np.array([i for i in candidates if i not in locked_crabe_indices], dtype=int)
+
+                    picked = []
+                    if len(candidates) > 0:
+                        for i in candidates[np.argsort(deviation[candidates - 1])]:
+                            if all(abs(int(i) - j) >= 2 for j in picked):
+                                picked.append(int(i))
+                            if len(picked) >= adaptive_insert_max_per_event:
+                                break
+
+                    # Suppression des points inutiles
+                    for i in sorted(picked, reverse=True):
+                        smoothed_waypoints = np.delete(smoothed_waypoints, i, axis=0)
+                        original_waypoints = np.delete(original_waypoints, i, axis=0)
+
+                        if crabe_focus and locked_crabe_indices:
+                            locked_crabe_indices = {(l - 1 if l > i else l) for l in locked_crabe_indices}
+                            locked_crabe_data = {(l - 1 if l > i else l): d for l, d in locked_crabe_data.items()}
+
                     if picked:
                         seg_streak = None
                         local_pts = len(smoothed_waypoints)
@@ -871,14 +1048,26 @@ def algo_worker(
                     _, distances_post, _ = local_pq.on_surface(smoothed_waypoints)
                 curr_mean_dist = float(np.mean(distances_post[1:-1])) if len(distances_post) > 2 else 0.0
 
+            existing_crabes_list = cfg.get("existing_crabes", [])
+            existing_positions_list = []
+            for c in existing_crabes_list:
+                if "routing_points" in c and c["routing_points"]:
+                    existing_positions_list.extend(c["routing_points"])
+                else:
+                    existing_positions_list.append(c["position"])
+
+            existing_positions_arr = np.array(existing_positions_list,
+                                              dtype=np.float32) if existing_positions_list else None
+
             with geom_lock:
                 final_crabes, _, crabe_diag = compute_crabes(
                     smoothed_waypoints, local_pq, mesh, crabe_geometry, crabe_normal_cos_threshold,
                     crabe_surface_tolerance, crabe_straightness_tolerance, crabe_min_spacing,
-                    max_clearance=crabe_max_clearance, clash_tolerance=crabe_clash_tolerance
+                    max_clearance=crabe_max_clearance, clash_tolerance=crabe_clash_tolerance,
+                    existing_positions=existing_positions_arr
                 )
 
-            """if crabe_debug_every > 0 and current_iter % crabe_debug_every == 0 and crabe_geometry is None:
+            if crabe_debug_every > 0 and current_iter % crabe_debug_every == 0 and crabe_geometry is None:
                 if not crabe_stl_path:
                     print(f"🦀 [{algo_name}] fonctionnalité crabe DÉSACTIVÉE : crabe_stl_path est vide "
                           f"(renseignez CRABE_STL_PATH en tête de fichier ou la variable d'environnement)")
@@ -891,7 +1080,7 @@ def algo_worker(
                       f"hauteur<= {crabe_max_clearance:.0f}mm : {crabe_diag['hauteur_ok']} | "
                       f"plan : {crabe_diag['plan_ok']} | droit : {crabe_diag['droit_ok']} | "
                       f"éligibles : {crabe_diag['eligibles']} | rejets clash : {crabe_diag['clash_rejets']} | "
-                      f"posés : {len(final_crabes)}")"""
+                      f"posés : {len(final_crabes)}")
 
             with data_lock:
                 shared_state["algos"][algo_name]["waypoints"] = smoothed_waypoints
