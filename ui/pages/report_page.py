@@ -101,6 +101,17 @@ class ReportPage(ctk.CTkScrollableFrame):
         )
         self.btn_report.pack(side="left", padx=(SPACE.SM, 0))
 
+        # Fin naturelle du flux : renvoyer le tracé retenu dans le document
+        # CATIA ouvert. Sans effet hors Windows, où le bouton signale
+        # simplement que CATIA n'est pas joignable.
+        self.btn_catia = ctk.CTkButton(
+            buttons, text=t("report.export.catia"), height=42, font=FONT.BODY_BOLD,
+            fg_color="transparent", border_width=1, border_color=theme.BORDER,
+            text_color=theme.TEXT, hover_color=theme.SURFACE_ALT,
+            command=lambda: self._export("catia"),
+        )
+        self.btn_catia.pack(side="left", padx=(SPACE.SM, 0))
+
         self.pill = StatusPill(buttons, text="", tone="neutral")
         self.pill.pack(side="right")
 
@@ -110,7 +121,7 @@ class ReportPage(ctk.CTkScrollableFrame):
 
     def _set_exports_enabled(self, enabled: bool):
         state = "normal" if enabled else "disabled"
-        for button in (self.btn_stl, self.btn_csv, self.btn_report):
+        for button in (self.btn_stl, self.btn_csv, self.btn_report, self.btn_catia):
             button.configure(state=state)
 
     def _on_agent_changed(self, name: str):
@@ -121,6 +132,11 @@ class ReportPage(ctk.CTkScrollableFrame):
         name = self.f_agent.get()
         if not name:
             return
+        if kind == "catia":
+            self.pill.update_status(self.t("report.catia.sending"), "info")
+            self.app.controller.export(name, kind)
+            return
+
         result = self.app.controller.export(name, kind)
         if result:
             self.pill.update_status(f"{self.t('report.exported')} · {result}", "ok")
@@ -170,6 +186,13 @@ class ReportPage(ctk.CTkScrollableFrame):
             }
         )
 
+    def report_catia_result(self, ok: bool, message: str):
+        """Rend compte de l'envoi vers CATIA, qui se fait en arrière-plan."""
+        if ok:
+            self.pill.update_status(self.t("report.catia.done"), "ok")
+        else:
+            self.pill.update_status(message.split("\n")[0][:80], "danger")
+
     def update_language(self):
         t = self.t
         self.lbl_title.configure(text=t("report.title"))
@@ -180,6 +203,7 @@ class ReportPage(ctk.CTkScrollableFrame):
         self.btn_stl.configure(text=t("report.export.stl"))
         self.btn_csv.configure(text=t("report.export.csv"))
         self.btn_report.configure(text=t("report.export.report"))
+        self.btn_catia.configure(text=t("report.export.catia"))
         self.kpis.set_labels(
             {
                 "length": t("kpi.length"), "bend": t("kpi.bend"),

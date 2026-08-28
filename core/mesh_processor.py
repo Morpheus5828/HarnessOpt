@@ -44,18 +44,19 @@ class CatiaUnavailable(RuntimeError):
 def _import_catia_exporter():
     """Importe l'exportateur CATIA à la demande.
 
-    ``core/catia_handler.py`` dépend de l'installation locale (pywin32, CATIA
-    lancé, macro VBA) et n'est pas versionné : on ne l'importe donc qu'au
-    moment où l'utilisateur demande réellement un export.
+    L'import reste tardif pour que l'application démarre même si le connecteur
+    a été retiré du poste. Le connecteur lui-même s'importe sur toutes les
+    plateformes : c'est à l'appel qu'il signale l'absence de pywin32 ou de
+    CATIA, avec un message distinct dans chaque cas.
     """
     try:
         from core.catia_handler import run_catia_export_via_vba  # type: ignore
     except ImportError as exc:
         raise CatiaUnavailable(
-            "Le module d'export CATIA (core/catia_handler.py) est introuvable "
-            "sur ce poste.\n\n"
-            "Cochez « J'ai déjà mes STL » pour travailler à partir d'un dossier "
-            "de STL déjà exportés, ou installez le connecteur CATIA."
+            "Le connecteur CATIA (core/catia_handler.py) est introuvable sur "
+            "ce poste.\n\n"
+            "Choisissez « Un dossier de fichiers STL déjà exportés » pour "
+            "travailler à partir de STL existants."
         ) from exc
     return run_catia_export_via_vba
 
@@ -160,7 +161,17 @@ def extraction_worker(target_dir, use_catia, exclude_filter, res_queue):
             start_pct, range_pct = 0.60, 0.35
             send_progress(0, 1, "🛰️ Export CATIA en cours...", 0.05)
             run_catia_export_via_vba = _import_catia_exporter()
-            run_catia_export_via_vba(exclude_filter)
+            try:
+                exported_dir = run_catia_export_via_vba(exclude_filter)
+            except RuntimeError as exc:
+                # CATIA absent, non lancé, ou macro en échec : ce sont des
+                # situations attendues, pas des bogues. On les remonte telles
+                # quelles à l'utilisateur plutôt qu'avec une pile d'appels.
+                raise CatiaUnavailable(str(exc)) from exc
+            if exported_dir:
+                # On relit le dossier réellement écrit par la macro plutôt que
+                # de le supposer : les deux modules ne peuvent plus diverger.
+                actual_stl_dir = str(exported_dir)
         else:
             start_pct, range_pct = 0.05, 0.90
             send_progress(0, 1, "📂 Lecture du dossier STL...", 0.05)
