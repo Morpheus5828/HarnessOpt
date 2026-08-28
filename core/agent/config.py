@@ -37,6 +37,10 @@ CONFIG = {
     # --- Garde-fous anti-zigzag / anti-explosion de distance ---
     "max_shift_band_multiplier": 3.0,
     "max_step_band_multiplier": 6.0,
+    # Plafond ABSOLU du déplacement d'un point par itération, en mm. Sans lui,
+    # le plafond ne dépendait que de la largeur de la bande de distance et
+    # pouvait atteindre plusieurs centaines de millimètres.
+    "max_step_mm": 25.0,
     "hard_max_clearance": 100.0,
 
     # --- "Route" (grande surface plane) vs "chemin de terre" (rebord étroit) ---

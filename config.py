@@ -1,18 +1,29 @@
+"""Constantes historiques du projet.
+
+Les chemins de travail sont désormais définis par :mod:`core.paths`, qui choisit
+un emplacement valable sur toutes les plateformes. Ce module les réexporte pour
+les scripts existants et, contrairement à sa version précédente, ne crée plus
+aucun dossier au moment de l'import : construire un dossier de cache parce
+qu'un module importe une constante de couleur est un effet de bord indésirable.
+
+Les valeurs de distance ci-dessous restent la référence des règles
+d'intégration ; elles alimentent ``DEFAULT_FAMILY_CLEARANCE`` dans
+:mod:`core.routing_rules`.
+"""
+
 from pathlib import Path
 
+from core.paths import BASE_CACHE, COLOR_DIR, FUSION_DIR, STL_DIR
+
 BASE_DIR = Path(__file__).resolve().parent
-BASE_CACHE = BASE_DIR / "resources" / "cache"
-BASE_CACHE.mkdir(parents=True, exist_ok=True)
 
 MODEL_PATH = BASE_DIR / "resources" / "model" / "best_mesh_classifier.joblib"
 
 INPUT_DIR = BASE_DIR / "resources"
 OUTPUT_DIR = BASE_DIR / "output"
-OUTPUT_DIR.mkdir(exist_ok=True)
 
-STL_FOLDER = BASE_CACHE / "stl"
-COLOR_PATH = BASE_CACHE / "color" / "dmu_color_parts.xlsx"
-FUSION_DIR = BASE_CACHE / "fusion"
+STL_FOLDER = STL_DIR
+COLOR_PATH = COLOR_DIR / "dmu_color_parts.xlsx"
 
 COLOR_BG = ("#F0F2F5", "#1A1C1E")
 
@@ -68,6 +79,9 @@ HARNESS_DIAMETER = 40
 
 LOG_LEVEL = "INFO"
 
+# Rayon de cintrage admissible du toron. Cette constante n'était utilisée nulle
+# part ; elle est désormais la valeur par défaut de la règle « rayon de cintrage »
+# (voir HarnessSpec.bend_radius_factor dans core/routing_rules.py).
 CURVE_RADIUS = HARNESS_DIAMETER * 6
 
 def as_dict():

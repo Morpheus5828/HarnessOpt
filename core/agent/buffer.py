@@ -1,8 +1,7 @@
 import numpy as np
 import torch
-from config import *
 
-from core.agent.config import CONFIG, device, STATE_DIM, ACTION_DIM
+from core.agent.config import ACTION_DIM, CONFIG, STATE_DIM, device
 
 class ReplayBuffer:
     def __init__(self, state_dim, action_dim, max_size=100000, use_cer=False):
