@@ -90,7 +90,6 @@ def injecter_geometrie_fixations_dans_chemins(all_variants_optimized, valid_fixa
             indices_a_supprimer = []
             marge_indices = max(5, int((dx * 1.5) / 1.0))
 
-            # 🟢 CORRECTION ICI : Suppression du walrus operator problématique
             fenetre_recherche = range(max(0, j - marge_indices), min(len(new_pts), j + marge_indices + 1))
 
             for k in fenetre_recherche:
@@ -152,7 +151,6 @@ def injecter_geometrie_fixations_dans_chemins(all_variants_optimized, valid_fixa
                                 f"⚠️ [FIX INJECTION] Entraxe collier {j} réduit à {scale * 100}% pour éviter une collision avec la structure.")
                         break
 
-                # 2️⃣ NIVEAU 2 : TEST DU NŒUD CENTRAL PUR SI LES TRIPLETS ONT ÉCHOUÉ
                 if not solution_safe_trouvee:
                     sub_segments_center = []
                     if pt_avant is not None:
@@ -680,53 +678,50 @@ def animer_lissage_harnais_3d(pts_bruts, valid_fixations, mesh_global, tube_radi
         return False
 
     # =========================================================================
-    # 🚀 BOUCLE SANS BRIDE (NO SLEEP)
+    # 🚀 BOUCLE SANS BRIDE (NO SLEEP) - CORRIGÉE
     # =========================================================================
-        # =========================================================================
-        # 🚀 BOUCLE SANS BRIDE (NO SLEEP) - VERSION CORRIGÉE
-        # =========================================================================
-        def demarrer_lissage_automatique(value=None):
-            if state["is_running"]:
-                return
+    def demarrer_lissage_automatique(value=None):
+        if state["is_running"]:
+            return
 
-            state["is_running"] = True
+        state["is_running"] = True
 
-            while state["frame"] < max_frames:
-                # Sécurité anti-crash : on vérifie si l'utilisateur a fermé la fenêtre
-                if pl.closed or pl.renderer is None:
-                    break
+        while state["frame"] < max_frames:
+            # Sécurité anti-crash : on vérifie si l'utilisateur a fermé la fenêtre
+            if pl.closed or pl.renderer is None:
+                break
 
-                state["frame"] += 1
+            state["frame"] += 1
 
-                # --- 100 CALCULS INTENSIFS EN COULISSES ---
-                for _ in range(100):
-                    calculer_un_pas_agent_rl()
+            # --- 100 CALCULS INTENSIFS EN COULISSES ---
+            for _ in range(100):
+                calculer_un_pas_agent_rl()
 
-                # Rendu VTK ultra-rapide
-                new_line = pv.MultipleLines(points=state["path"])
-                new_tube = new_line.tube(radius=tube_radius, n_sides=16, capping=True)
+            # Rendu VTK ultra-rapide
+            new_line = pv.MultipleLines(points=state["path"])
+            new_tube = new_line.tube(radius=tube_radius, n_sides=16, capping=True)
 
-                # Check collisions uniquement une frame sur 20
-                if state["frame"] % 20 == 0 or state["frame"] == max_frames:
-                    if mesh_global is not None:
-                        _, state["last_collisions"] = new_tube.collision(mesh_global)
+            # Check collisions uniquement une frame sur 20
+            if state["frame"] % 20 == 0 or state["frame"] == max_frames:
+                if mesh_global is not None:
+                    _, state["last_collisions"] = new_tube.collision(mesh_global)
 
-                couleur_harnais = "dodgerblue" if state["best_score"] > -10.0 else "orange"
+            couleur_harnais = "dodgerblue" if state["best_score"] > -10.0 else "orange"
 
-                pl.add_mesh(new_tube, color=couleur_harnais, opacity=0.5, name="harness_volume")
-                pl.add_mesh(new_line, color="black", line_width=3, name="harness_axis")
+            pl.add_mesh(new_tube, color=couleur_harnais, opacity=0.5, name="harness_volume")
+            pl.add_mesh(new_line, color="black", line_width=3, name="harness_axis")
 
-                pl.add_text(
-                    f"⚡ MODE TURBO - Itération: {state['frame']} / {max_frames}\n"
-                    f"📐 Score Courbure : {state['best_score']:.2f}\n"
-                    f"💥 Interférences : {state['last_collisions']}",
-                    position="upper_left", color="darkred", font_size=12, name="dashboard"
-                )
+            pl.add_text(
+                f"⚡ MODE TURBO - Itération: {state['frame']} / {max_frames}\n"
+                f"📐 Score Courbure : {state['best_score']:.2f}\n"
+                f"💥 Interférences : {state['last_collisions']}",
+                position="upper_left", color="darkred", font_size=12, name="dashboard"
+            )
 
-                pl.update()
+            pl.update()
 
-                if pl.iren is not None:
-                    pl.iren.process_events()
+            if pl.iren is not None:
+                pl.iren.process_events()
 
-            print(f"🎉 Fini ! Score final : {state['best_score']:.2f}")
-            state["is_running"] = False
+        print(f"🎉 Fini ! Score final : {state['best_score']:.2f}")
+        state["is_running"] = False
