@@ -69,6 +69,26 @@ class MeshModel:
                 progress_callback(i, total, f"🎨 Analyse des couleurs: {i}/{total}", prog_pct)
 
         df = pd.DataFrame({"Part Number": all_parts, "Color": all_color, "Presence": all_presence})
-        self.color_path.parent.mkdir(parents=True, exist_ok=True)
-        df.to_excel(str(self.color_path), index=False)
+        self._export_table(df)
         return df
+
+    def _export_table(self, df):
+        """Écrit la table des couleurs sur disque (Excel, sinon CSV).
+
+        L'export est un livrable annexe : s'il échoue (openpyxl absent, fichier
+        déjà ouvert dans Excel, dossier en lecture seule), on ne fait pas
+        échouer toute l'extraction pour autant.
+        """
+        self.color_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            df.to_excel(str(self.color_path), index=False)
+            return self.color_path
+        except Exception as exc:
+            csv_path = self.color_path.with_suffix(".csv")
+            print(f"\u26a0\ufe0f Export Excel impossible ({exc}) -> repli CSV : {csv_path}")
+            try:
+                df.to_csv(str(csv_path), index=False)
+                return csv_path
+            except Exception as exc2:
+                print(f"\u26a0\ufe0f Export CSV impossible lui aussi : {exc2}")
+                return None

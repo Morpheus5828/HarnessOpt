@@ -1,0 +1,28 @@
+# Interface
+customtkinter>=5.2
+pillow>=10.0
+
+# Géométrie et maillages
+numpy>=1.24
+scipy>=1.10
+trimesh>=4.0
+pyvista>=0.43
+rtree>=1.0
+
+# Apprentissage par renforcement
+torch>=2.0
+
+# Données et graphiques
+pandas>=2.0
+matplotlib>=3.7
+openpyxl>=3.1
+
+# Accélération facultative mais recommandée : sans elle, les agents restent
+# bridés à un thread BLAS chacun (voir core/agent_worker.py).
+threadpoolctl>=3.2
+
+# Détection des fixations existantes (recalage ICP)
+open3d>=0.18
+
+# Windows uniquement : pilotage de CATIA pour l'export STL.
+pywin32>=306 ; sys_platform == "win32"

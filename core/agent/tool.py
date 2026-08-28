@@ -322,10 +322,13 @@ def compute_crabes(waypoints, local_pq, mesh, crabe_geometry, normal_cos_thresho
         return [], np.zeros(len(waypoints), dtype=bool), {}
 
     dx, dy = crabe_geometry["dx"], crabe_geometry["dy"]
-    eligible, _, x_axis, y_axis, normal, surface_pts, diag = evaluate_crabe_alignment(
+    eligible, min_cos, x_axis, y_axis, normal, surface_pts, diag = evaluate_crabe_alignment(
         waypoints, local_pq, mesh, dx, dy, normal_cos_threshold, surface_tolerance, straightness_tolerance,
         max_clearance=max_clearance
     )
+    # Écart de parallélisme entre l'embase du crabe et la structure, en degrés :
+    # c'est la mesure directe de « chaque crabe doit être posé à plat ».
+    tilt_deg = np.degrees(np.arccos(np.clip(min_cos, -1.0, 1.0)))
     clash_rejects = [0]
 
     def _clash_ok(i):
@@ -340,9 +343,18 @@ def compute_crabes(waypoints, local_pq, mesh, crabe_geometry, normal_cos_thresho
                                      is_valid=_clash_ok)
     diag["clash_rejets"] = clash_rejects[0]
 
+    seg = np.linalg.norm(np.diff(waypoints, axis=0), axis=1) if len(waypoints) > 1 else np.zeros(0)
+    cum_arc = np.concatenate([[0.0], np.cumsum(seg)])
+
     crabes = []
     for i in placed_idx:
         crabes.append({
+            # Index et abscisse curviligne du point porteur : c'est ce qui
+            # permet de vérifier la règle des 250 mm sans recalculer la
+            # trajectoire (voir core.routing_rules).
+            "index": int(i),
+            "arc_mm": float(cum_arc[i]) if i < len(cum_arc) else 0.0,
+            "tilt_deg": float(tilt_deg[i]),
             "position": waypoints[i].astype(np.float32),
             "surface_position": np.asarray(surface_pts[i], dtype=np.float32),
             "x_axis": x_axis[i].astype(np.float32),

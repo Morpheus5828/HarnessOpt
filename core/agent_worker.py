@@ -23,6 +23,10 @@ from core.agent.agent import *
 from core.agent.buffer import *
 from core.agent.tool import *
 
+from core import reward_terms as rwt
+from core.orchestrator import ROLES, BASE_WEIGHTS
+from core.routing_rules import ClearanceModel, HarnessSpec, RoutingRules, evaluate_route
+
 
 benchmark_algos = {
     "TD3_Geodesique": {"agent": RLAgent(use_td3=True), "buffer": ReplayBuffer(STATE_DIM, ACTION_DIM, use_cer=True),
@@ -93,8 +97,22 @@ def algo_worker(
         data_lock,
         geom_lock,
         point_A,
-        point_B
+        point_B,
+        rules=None,
+        spec=None,
 ):
+    """Boucle d'optimisation d'un agent sur une trajectoire.
+
+    Args:
+        rules: jeu de règles d'intégration (:class:`core.routing_rules.RoutingRules`).
+            Sert à la fois à récompenser l'agent et à publier, à chaque
+            itération, le rapport de conformité que lit l'interface. ``None``
+            reconstruit un jeu de règles depuis la configuration partagée.
+        spec: fiche de rôle (:class:`core.orchestrator.AgentSpec`) donnant les
+            pondérations de récompense et les hyperparamètres propres à la
+            spécialité de cet agent. ``None`` applique des poids neutres, ce
+            qui reproduit le comportement historique.
+    """
     try:
         if data_lock is None:
             data_lock = threading.Lock()
@@ -103,10 +121,26 @@ def algo_worker(
 
         agent = benchmark_algos[algo_name]["agent"]
         replay_buffer = benchmark_algos[algo_name]["buffer"]
-        role = benchmark_algos[algo_name]["role"]
-        crabe_focus = benchmark_algos[algo_name].get("crabe_focus", False)
+        entry = benchmark_algos[algo_name]
+        spec = spec if spec is not None else entry.get("spec")
+
+        # « role » garde ici son sens historique (explorateur = grands pas,
+        # optimiseur = petits pas). La spécialité métier de l'agent, elle, est
+        # portée par « spec.role » et se traduit en pondérations de récompense.
+        role = entry.get("role", "explorer")
+        crabe_focus = entry.get("crabe_focus", False)
+
+        role_weights = dict(BASE_WEIGHTS)
+        if spec is not None:
+            role_weights.update(getattr(spec, "weights", {}) or {})
+            crabe_focus = crabe_focus or getattr(spec, "role", "") == "fixer"
 
         local_pq = ProximityQuery(mesh)
+
+        # Modèle de distances : uniforme par défaut, différencié par famille de
+        # couleur dès que la fusion a produit la table des faces.
+        clearance_model = rules.clearance if rules is not None else None
+        n_mesh_faces = len(mesh.faces)
 
         boundary_kdtree = None
         boundary_edges_idx = trimesh.grouping.group_rows(mesh.edges_sorted, require_count=1)
@@ -120,6 +154,12 @@ def algo_worker(
             exploration_noise = cfg["exploration_noise_start"]
             local_pts = int(cfg["initial_points"])
 
+        if spec is not None:
+            exploration_noise = float(getattr(spec, "noise_start", exploration_noise))
+
+        #: Réglages perturbés lors de la dernière migration (voir orchestrateur).
+        perturbation: dict = {}
+
         # ⚠️ Le contrôleur a DÉJÀ calculé ce chemin géodésique une seule fois (de façon sûre,
         # sur le thread principal) et l'a passé ici via le paramètre 'initial_waypoints' : on le
         # réutilise tel quel au lieu de relancer un second calcul géodésique. Le recalculer ici
@@ -128,6 +168,11 @@ def algo_worker(
         # une ligne droite) -> c'est pour ça que le tracé géodésique ne s'affichait pas
         # correctement dès le début.
         original_waypoints = np.asarray(initial_waypoints, dtype=np.float32).copy()
+        #: Longueur du chemin géodésique de départ, servant de référence pour
+        #: mesurer les détours.
+        reference_length = float(
+            np.sum(np.linalg.norm(np.diff(original_waypoints, axis=0), axis=1))
+        )
         with data_lock:
             shared_state["algos"][algo_name]["waypoints"] = original_waypoints.copy()
             shared_state["algos"][algo_name]["initial_waypoints"] = original_waypoints.copy()
@@ -169,6 +214,44 @@ def algo_worker(
                 wp_current = shared_state["algos"][algo_name]["waypoints"].copy()
                 done = shared_state["algos"][algo_name]["done"]
                 prev_disp = shared_state["algos"][algo_name].get("prev_disp", None)
+                # Ordre de migration déposé par l'orchestrateur : on repart de
+                # la route d'un agent mieux classé, avec des réglages perturbés.
+                incoming = shared_state["algos"][algo_name].pop("migrate_from", None)
+
+            if incoming is not None:
+                inbound_wps = np.asarray(incoming.get("waypoints"), dtype=np.float32)
+                if inbound_wps.ndim == 2 and len(inbound_wps) >= 2:
+                    wp_current = inbound_wps.copy()
+                    original_waypoints = inbound_wps.copy()
+                    reference_length = min(
+                        reference_length,
+                        float(np.sum(np.linalg.norm(np.diff(inbound_wps, axis=0), axis=1))),
+                    )
+                    local_pts = len(wp_current)
+                    # On repart de la trajectoire de l'autre, pas de son passé :
+                    # historiques de stagnation et d'inertie sont remis à plat.
+                    prev_disp = None
+                    seg_streak = None
+                    sharp_streak = None
+                    success_streak = 0
+                    regress_streak = 0
+                    iters_since_best = 0
+                    best_collisions = None
+                    best_reward = None
+                    best_waypoints = None
+                    best_original_waypoints = None
+                    locked_crabe_indices = set()
+                    locked_crabe_data = {}
+                    shape_changed_this_iter = True
+                perturbation = dict(incoming.get("perturbation", {}) or {})
+                exploration_noise = max(
+                    exploration_noise, float(perturbation.get("noise_scale", 1.0)) * 0.25
+                )
+                with data_lock:
+                    shared_state["algos"][algo_name]["waypoints"] = wp_current.copy()
+                    shared_state["algos"][algo_name]["migrations"] = (
+                        shared_state["algos"][algo_name].get("migrations", 0) + 1
+                    )
 
             safe_margin = cfg["min_margin"]
             d_soft = cfg["max_margin"]
@@ -213,6 +296,25 @@ def algo_worker(
             laplace_weight = cfg.get("laplace_weight", 20.0)
             smooth_bonus_weight = cfg.get("smooth_bonus_weight", 60.0)
             smooth_sharp_penalty = cfg.get("smooth_sharp_penalty", 150.0)
+
+            # --- Règles d'intégration exprimées en unités physiques ---------
+            # Rayon de cintrage admissible du toron : c'est LA grandeur qui
+            # décide s'il y a cassure. Par défaut 6 x le diamètre, valeur
+            # usuelle pour un faisceau électrique.
+            harness_diameter = float(cfg.get("harness_diameter", 40.0))
+            min_bend_radius = float(
+                cfg.get("min_bend_radius", harness_diameter * cfg.get("bend_radius_factor", 6.0))
+            )
+            straight_tol_deg = float(cfg.get("straight_tol_deg", 3.0))
+            straight_weight = float(cfg.get("straight_weight", 25.0))
+            straight_run_bonus = float(cfg.get("straight_run_bonus", 15.0))
+            straight_run_scale = float(cfg.get("straight_run_scale_mm", 500.0))
+            fixation_pitch = float(cfg.get("fixation_pitch_mm", cfg.get("crabe_min_spacing", 250.0)))
+            free_span_weight = float(cfg.get("free_span_weight", 80.0))
+            detour_weight = float(cfg.get("detour_weight", 40.0))
+            detour_tolerance = float(cfg.get("detour_tolerance", 1.15))
+            fixation_cover_weight = float(cfg.get("fixation_cover_weight", 30.0))
+            fixation_gap_penalty = float(cfg.get("fixation_gap_penalty", 60.0))
             smoothing_iterations = int(cfg.get("smoothing_iterations", 6))
             smoothing_blend = float(np.clip(cfg.get("smoothing_blend", 0.65), 0.0, 0.95))
             disp_spatial_smoothing = float(np.clip(cfg.get("disp_spatial_smoothing", 0.8), 0.0, 1.0))
@@ -239,8 +341,37 @@ def algo_worker(
                 train_steps_gpu = 3
                 step_momentum = float(np.clip(cfg.get("step_momentum_optimizer", 0.7), 0.0, 0.95))
 
+            # La fiche de rôle, quand elle existe, prime sur l'ancien couple
+            # explorateur/optimiseur : c'est elle qui porte le réglage du
+            # curseur Exploration <-> Exploitation choisi par l'utilisateur.
+            if spec is not None:
+                local_max_shift = cfg["local_max_shift"] * float(getattr(spec, "shift_scale", 1.0))
+                noise_decay = float(getattr(spec, "noise_decay", noise_decay))
+                train_steps_gpu = int(getattr(spec, "train_steps", train_steps_gpu))
+                step_momentum = float(np.clip(getattr(spec, "momentum", step_momentum), 0.0, 0.95))
+                patience_mult = max(1, int(round(float(getattr(spec, "patience", 1.0)))))
+                # Perturbation reçue lors d'une migration (étape « explore »
+                # du Population-Based Training) : elle n'est appliquée qu'à
+                # cet agent, pour que la population ne converge pas en bloc.
+                local_max_shift *= float(perturbation.get("shift_scale", 1.0))
+                step_momentum = float(np.clip(
+                    step_momentum + perturbation.get("momentum_delta", 0.0), 0.0, 0.95))
+
             local_max_shift = min(local_max_shift, band_width * max_shift_band_multiplier)
-            max_total_step = band_width * max_step_band_multiplier
+
+            # Plafond de déplacement par itération.
+            #
+            # Il était uniquement dérivé de la largeur de la bande de distance
+            # (min_margin -> max_margin), grandeur qui ne dit rien de la
+            # distance qu'un point de câble devrait parcourir en un pas : avec
+            # une bande 10-100 mm, un point pouvait bondir de 540 mm d'un coup,
+            # et le comportement changeait du tout au tout selon les marges
+            # saisies. On ajoute un plafond absolu, en millimètres, qui reste
+            # la contrainte dominante dans les cas usuels.
+            max_total_step = min(
+                band_width * max_step_band_multiplier,
+                float(cfg.get("max_step_mm", 25.0)),
+            )
 
             crabe_stl_path = cfg.get("crabe_stl_path", "")
             crabe_geometry = get_crabe_geometry(crabe_stl_path)
@@ -269,6 +400,9 @@ def algo_worker(
                 # on le réutilise au lieu de relancer un calcul géodésique en concurrence
                 # avec tous les autres threads d'agent au moment du reset.
                 original_waypoints = wp_current.copy()
+                reference_length = float(
+                    np.sum(np.linalg.norm(np.diff(original_waypoints, axis=0), axis=1))
+                )
                 success_streak = 0
                 wp_current = original_waypoints.copy()
                 prev_disp = None
@@ -440,14 +574,26 @@ def algo_worker(
                 # ==========================================================
                 # 🤩 RÉCOMPENSES
                 # ==========================================================
-                R_margin = np.zeros_like(distances[danger_indices])
-                mask_soft = (distances[danger_indices] >= safe_margin) & (distances[danger_indices] < d_soft)
-                mask_hard = distances[danger_indices] < safe_margin
-                mask_sky = distances[danger_indices] >= d_soft
+                # Distance exigée point par point : uniforme si le DMU n'a pas
+                # été classé par couleur, renforcée au-dessus d'une hydraulique
+                # haute pression ou d'une ligne d'air chaud dans le cas
+                # contraire. C'est ce tableau, et non plus un scalaire, qui
+                # définit désormais « trop près ».
+                if clearance_model is not None and clearance_model.is_differentiated:
+                    required_all = clearance_model.required_min(face_indices).astype(np.float32)
+                    required_all = np.maximum(required_all, safe_margin)
+                else:
+                    required_all = np.full(len(wp_current), safe_margin, dtype=np.float32)
+                required_here = required_all[danger_indices]
 
-                R_margin[mask_soft] = 100.0
-                R_margin[mask_hard] = -50.0 * (safe_margin - distances[danger_indices][mask_hard]) / safe_margin
-                R_margin[mask_sky] = -5.0 * (distances[danger_indices][mask_sky] - d_soft)
+                R_margin = rwt.clearance_reward(
+                    distances[danger_indices], required_here, d_soft,
+                    band_bonus=100.0, too_close_penalty=50.0, too_far_penalty=5.0,
+                )
+
+                mask_soft = (distances[danger_indices] >= required_here) & (distances[danger_indices] < d_soft)
+                mask_hard = distances[danger_indices] < required_here
+                mask_sky = distances[danger_indices] >= d_soft
 
                 dist_to_goal_current = np.linalg.norm(wp_current - point_B, axis=1)
                 progression_error = dist_to_goal_current[danger_indices] - dist_to_goal_current[danger_indices - 1]
@@ -462,11 +608,35 @@ def algo_worker(
                 norm_out = np.linalg.norm(v_out, axis=1) + 1e-8
                 cos_angle = np.einsum('ij,ij->i', v_in, v_out) / (norm_in * norm_out)
 
-                R_smooth = np.where(cos_angle < max_bend, -smooth_sharp_penalty, smooth_bonus_weight * cos_angle)
+                # Cintrage jugé sur le rayon réellement réalisable, en mm, et
+                # non plus sur le cosinus entre segments : le signal ne dépend
+                # donc plus de la densité de points, et une insertion de point
+                # ne change plus artificiellement la note du tronçon.
+                candidate_for_shape = wp_current.copy()
+                candidate_for_shape[danger_indices] = proposed_wps
+
+                R_bend = rwt.bend_reward(
+                    candidate_for_shape, min_bend_radius,
+                    weight=smooth_bonus_weight, violation_penalty=smooth_sharp_penalty,
+                )[danger_indices]
+
+                # Le laplacien reste : il pénalise les dents de scie de faible
+                # amplitude, que le rayon de cintrage seul laisse passer.
                 laplacian = wp_current[danger_indices - 1] - 2 * proposed_wps + wp_current[danger_indices + 1]
                 R_laplace = -laplace_weight * np.linalg.norm(laplacian, axis=1)
 
-                R_smooth_total = R_smooth + R_laplace
+                R_smooth_total = R_bend + R_laplace
+
+                # « Rester droit le plus longtemps possible » : la prime croît
+                # avec la longueur de la ligne droite à laquelle le point
+                # appartient, pas seulement avec sa platitude locale.
+                R_straight = rwt.straightness_reward(
+                    candidate_for_shape,
+                    angle_tol_deg=straight_tol_deg,
+                    weight=straight_weight,
+                    run_bonus=straight_run_bonus,
+                    run_scale_mm=straight_run_scale,
+                )[danger_indices]
 
                 R_c = np.where(inside_mask[danger_indices], -100.0, 0.0)
                 if boundary_kdtree is not None:
@@ -512,6 +682,7 @@ def algo_worker(
                 else:
                     R_tunnel = np.zeros(len(danger_indices), dtype=np.float32)
 
+                current_crabes = []
                 if crabe_geometry is not None:
                     crabe_eligible_full, crabe_margin_full, _, _, _, _, _ = evaluate_crabe_alignment(
                         candidate_full, local_pq, mesh, crabe_geometry["dx"], crabe_geometry["dy"],
@@ -556,20 +727,85 @@ def algo_worker(
                         mask_hit = dists_to_c < 20.0  # Rayon de tolérance pour considérer la fixation "capturée"
                         R_existing[mask_hit] += cfg.get("existing_crabe_reward", 500.0)
 
-                rewards_batch = (R_margin + R_towards + R_smooth_total + R_c + R_sensor + R_flatness
-                                 + R_lookahead + R_crabe + R_tunnel + R_existing)  # <-- Ajouté ici
+                # ==========================================================
+                # 🕳️ NE PAS TRAVERSER UN VOLUME VIDE
+                # ==========================================================
+                # La pénalité ne porte pas sur le fait d'être ponctuellement
+                # loin d'une pièce, mais sur la LONGUEUR de la portion sans
+                # aucun appui possible : c'est cela qui rend un cheminement
+                # irréalisable, pas un point isolé un peu éloigné.
+                R_free_span = rwt.free_span_penalty(
+                    candidate_full, distances, d_soft, fixation_pitch, weight=free_span_weight,
+                )[danger_indices]
+
+                # Couverture par les fixations : chaque point doit être tenu à
+                # moins d'un demi-pas d'un crabe (ou d'une extrémité).
+                crabe_arc = []
+                if current_crabes:
+                    cum_arc = np.concatenate([[0.0], np.cumsum(
+                        np.linalg.norm(np.diff(candidate_full, axis=0), axis=1))])
+                    crabe_arc = [
+                        float(cum_arc[i]) for i in current_crabes if 0 <= int(i) < len(cum_arc)
+                    ]
+                R_fixation = rwt.fixation_coverage_reward(
+                    candidate_full, crabe_arc, pitch_mm=fixation_pitch,
+                    weight=fixation_cover_weight, gap_penalty=fixation_gap_penalty,
+                )[danger_indices]
+
+                # Détour : sans ce terme, contourner largement un obstacle
+                # satisfait toutes les autres règles et rien ne s'y oppose.
+                R_detour = rwt.detour_penalty(
+                    candidate_full, reference_length,
+                    weight=detour_weight, tolerance=detour_tolerance,
+                )[danger_indices]
+
+                # ==========================================================
+                # ⚖️ PONDÉRATION PAR LE RÔLE DE L'AGENT
+                # ==========================================================
+                # Chaque rôle insiste sur une famille de règles sans jamais en
+                # débrancher aucune : un lisseur reste tenu de ne pas percuter
+                # une cloison, il y consacre simplement moins d'effort qu'un
+                # éclaireur. Les poids viennent de core.orchestrator.
+                w_clearance = role_weights.get("clearance", 1.0)
+                w_clash = role_weights.get("clash", 1.0)
+                w_bend = role_weights.get("bend", 1.0)
+                w_straight = role_weights.get("straight", 1.0)
+                w_span = role_weights.get("free_span", 1.0)
+                w_fix = role_weights.get("fixation", 1.0)
+                w_length = role_weights.get("length", 1.0)
+
+                rewards_batch = (
+                    w_clearance * R_margin
+                    + R_towards
+                    + w_bend * R_smooth_total
+                    + w_straight * R_straight
+                    + w_clash * R_c
+                    + w_clearance * R_sensor
+                    + w_clearance * R_flatness
+                    + w_span * R_lookahead
+                    + w_fix * R_crabe
+                    + w_clash * R_tunnel
+                    + w_fix * R_existing
+                    + w_span * R_free_span
+                    + w_fix * R_fixation
+                    + w_length * R_detour
+                )
 
                 r_det = {
-                    "Margin": float(R_margin.mean()),
+                    "Margin": float((w_clearance * R_margin).mean()),
                     "Towards": float(R_towards.mean()),
-                    "Smooth": float(R_smooth_total.mean()),
-                    "Crash": float(R_c.mean()),
-                    "Sensor": float(R_sensor.mean()),
-                    "Flat": float(R_flatness.mean()),
-                    "Ahead": float(R_lookahead.mean()),
-                    "Crabe": float(R_crabe.mean()),
-                    "Tunnel": float(R_tunnel.mean()),
-                    "Existant": float(R_existing.mean()),
+                    "Smooth": float((w_bend * R_smooth_total).mean()),
+                    "Straight": float((w_straight * R_straight).mean()),
+                    "Crash": float((w_clash * R_c).mean()),
+                    "Sensor": float((w_clearance * R_sensor).mean()),
+                    "Flat": float((w_clearance * R_flatness).mean()),
+                    "Ahead": float((w_span * R_lookahead).mean()),
+                    "Crabe": float((w_fix * R_crabe).mean()),
+                    "Tunnel": float((w_clash * R_tunnel).mean()),
+                    "Existant": float((w_fix * R_existing).mean()),
+                    "FreeSpan": float((w_span * R_free_span).mean()),
+                    "Fixation": float((w_fix * R_fixation).mean()),
+                    "Detour": float((w_length * R_detour).mean()),
                 }
                 local_reward = sum(r_det.values())
 
@@ -985,7 +1221,9 @@ def algo_worker(
                         prev_disp = None
                         shape_changed_this_iter = True
 
-            noise_floor = crabe_focus_noise_floor if crabe_focus else 0.05
+            noise_floor = float(getattr(spec, "noise_floor", None) if spec is not None
+                                else (crabe_focus_noise_floor if crabe_focus else 0.05))
+            noise_floor *= float(perturbation.get("noise_scale", 1.0))
             exploration_noise = max(noise_floor, exploration_noise * noise_decay)
             if success_streak > success_noise_streak * patience_mult:
                 exploration_noise = 0.0
@@ -1082,10 +1320,63 @@ def algo_worker(
                       f"éligibles : {crabe_diag['eligibles']} | rejets clash : {crabe_diag['clash_rejets']} | "
                       f"posés : {len(final_crabes)}")
 
+            # ==========================================================
+            # 📋 RAPPORT DE CONFORMITÉ
+            # ==========================================================
+            # Le même verdict que celui affiché à l'utilisateur, calculé ici à
+            # partir de la position réelle du câble. C'est lui qui sert de
+            # score de classement à l'orchestrateur : les agents sont donc
+            # départagés sur exactement ce que l'intégrateur va lire.
+            route_report = None
+            try:
+                if rules is not None:
+                    # Le raffinement adaptatif a pu insérer ou retirer des
+                    # points depuis le dernier relevé : on remesure sur la
+                    # trajectoire réellement publiée, sinon les tableaux ne
+                    # sont plus alignés.
+                    with geom_lock:
+                        closest_rep, dist_rep, face_rep = local_pq.on_surface(smoothed_waypoints)
+                    inside_rep = np.einsum(
+                        'ij,ij->i', smoothed_waypoints - closest_rep, mesh.face_normals[face_rep]
+                    ) < 0
+
+                    if clearance_model is not None and clearance_model.is_differentiated:
+                        required_report = np.maximum(
+                            clearance_model.required_min(face_rep).astype(np.float64), safe_margin
+                        )
+                    else:
+                        required_report = np.full(len(smoothed_waypoints), safe_margin)
+
+                    route_report = evaluate_route(
+                        smoothed_waypoints,
+                        rules,
+                        distances=dist_rep,
+                        required_min=required_report,
+                        inside_mask=inside_rep,
+                        n_crossings=n_crossings,
+                        clamp_arc_positions=[c.get("arc_mm", 0.0) for c in final_crabes],
+                        clamp_tilt_deg=[c.get("tilt_deg", 0.0) for c in final_crabes],
+                    )
+            except Exception as exc:
+                # Un rapport indisponible ne doit jamais interrompre
+                # l'apprentissage : on le signale et on continue.
+                if crabe_debug_every > 0 and current_iter % max(crabe_debug_every, 1) == 0:
+                    print(f"⚠️ [{algo_name}] rapport de conformité indisponible : {exc}")
+
             with data_lock:
                 shared_state["algos"][algo_name]["waypoints"] = smoothed_waypoints
                 shared_state["algos"][algo_name]["iteration"] += 1
                 shared_state["algos"][algo_name]["collisions"] = current_collisions
+                if route_report is not None:
+                    # Rappelée dans les KPI pour que l'interface puisse colorer
+                    # l'indicateur sans reconstruire le jeu de règles.
+                    route_report.kpis["bend_limit_mm"] = rules.harness.min_bend_radius_mm
+                    route_report.kpis["fixation_pitch_mm"] = rules.fixation_pitch_mm
+                    shared_state["algos"][algo_name]["report"] = route_report
+                    shared_state["algos"][algo_name]["score"] = route_report.score()
+                    shared_state["algos"][algo_name]["kpis"] = route_report.kpis
+                    shared_state["algos"][algo_name]["compliant"] = route_report.is_compliant
+                    shared_state["algos"][algo_name]["deliverable"] = route_report.is_deliverable
 
                 shared_state["algos"][algo_name]["crossings"] = n_crossings
                 shared_state["algos"][algo_name].setdefault("crossing_history", []).append(n_crossings)

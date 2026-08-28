@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Sorties de l'application
+output/
+resources/cache/
+
+# Poste de travail : le connecteur CATIA dépend de l'installation locale
+# (pywin32, chemin de la macro) et n'a pas à être versionné.
+core/catia_handler.py
+
+# Systèmes d'exploitation
+.DS_Store
+Thumbs.db
