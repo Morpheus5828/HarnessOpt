@@ -133,7 +133,7 @@ class AppController:
 
         self._post(self.view.pages[0].show_results, self.extraction_summary)
         self._post(self.view.pages[1].show_families, sorted(families))
-        self._post(self.view.unlock_step, 1)
+        self._post(self.view.refresh_steps)
         self._post(self.view.refresh_cache_label)
         self._post(
             self.view.set_status,
@@ -178,16 +178,36 @@ class AppController:
     # Étape 2 : règles
     # ==================================================================
 
+    def max_reachable_step(self) -> int:
+        """Étape la plus avancée actuellement atteignable.
+
+        Cette fonction est la seule autorité sur le verrouillage : l'interface
+        s'y réfère au lieu de mémoriser ce qu'elle a déjà ouvert.
+        """
+        if not self.extraction_summary:
+            return 0
+        if self.view.pages[1].validate():
+            return 1
+        if self.shared_state is None:
+            return 2
+        return 3
+
+    def locked_reason(self, index: int) -> str:
+        """Ce qui manque pour atteindre une étape, dit en une phrase."""
+        if index >= 1 and not self.extraction_summary:
+            return self.t("step.locked.project")
+        if index >= 2:
+            problems = self.view.pages[1].validate()
+            if problems:
+                return problems[0]
+        if index >= 3 and self.shared_state is None:
+            return self.t("step.locked.routing")
+        return ""
+
     def on_step_shown(self, index: int):
         """Appelé à chaque changement d'étape."""
         if index == 1 and self.extraction_summary:
             self.view.pages[1].show_families(sorted(self.extraction_summary.get("families", {})))
-        elif index == 2:
-            problems = self.view.pages[1].validate()
-            if problems:
-                self.view.set_status(problems[0], "warn")
-            else:
-                self.view.unlock_step(2)
         elif index == 3:
             self._publish_reports()
 
@@ -383,7 +403,7 @@ class AppController:
             self._post(self._setup_viewer, waypoints)
             self._post(self._setup_charts)
             self._post(self.view.pages[2].set_running_state, "running")
-            self._post(self.view.unlock_step, 3)
+            self._post(self.view.refresh_steps)
             self._post(self.view.set_status, "Cheminement en cours…", "info")
             self._post(self._schedule_refresh)
 

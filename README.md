@@ -49,6 +49,14 @@ hyperparamètres d'algorithme ne sont pas exposés par défaut : le curseur
 **Exploration ↔ Exploitation** et le choix d'équipe les pilotent. Ils restent
 accessibles sous « Réglages avancés » pour qui veut y toucher.
 
+Une étape est accessible ou non selon **l'état réel du projet**, jamais selon
+les écrans déjà visités : *Règles* s'ouvre dès que la maquette est chargée,
+*Cheminement* dès que les règles sont cohérentes, *Rapport* dès qu'un
+cheminement a démarré. Si une condition cesse d'être remplie — des règles
+rendues incohérentes, par exemple — l'étape se referme et l'application dit
+laquelle des conditions manque. On avance soit par le bouton en bas de chaque
+écran, soit en cliquant directement le numéro d'étape en haut.
+
 ---
 
 ## Les règles d'intégration
