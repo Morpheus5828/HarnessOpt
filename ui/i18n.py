@@ -152,6 +152,17 @@ FR: dict[str, str] = {
     "routing.strategy": "Façon de travailler",
     "routing.team": "Équipe d'agents",
     "routing.team.help": "Chaque agent se consacre à un aspect différent du cheminement.",
+    "routing.start_path": "Chemin de départ",
+    "routing.start_path.help": (
+        "Comment relier les deux points avant que les agents ne l'améliorent. "
+        "La recherche dans l'espace libre traverse les ouvertures et part déjà "
+        "à bonne distance de la structure."
+    ),
+    "routing.start_path.geodesic": "Le long de la surface (géodésique)",
+    "routing.start_path.geodesic.help": (
+        "Suit le maillage. Inopérant sur une maquette faite de pièces disjointes, "
+        "où il se réduit à une ligne droite collée à la structure."
+    ),
     "routing.explore": "Exploration ↔ Exploitation",
     "routing.explore.help": (
         "À gauche, les agents peaufinent la meilleure route trouvée. "
@@ -352,6 +363,17 @@ EN: dict[str, str] = {
     "routing.strategy": "How to work",
     "routing.team": "Agent team",
     "routing.team.help": "Each agent focuses on a different aspect of the route.",
+    "routing.start_path": "Starting path",
+    "routing.start_path.help": (
+        "How the two points are linked before the agents improve it. Free-space "
+        "search goes through openings and starts at a sensible distance from "
+        "the structure."
+    ),
+    "routing.start_path.geodesic": "Along the surface (geodesic)",
+    "routing.start_path.geodesic.help": (
+        "Follows the mesh. Ineffective on a mock-up made of disjoint parts, where "
+        "it degrades to a straight line stuck to the structure."
+    ),
     "routing.explore": "Exploration ↔ Exploitation",
     "routing.explore.help": (
         "On the left, agents refine the best route found. On the right, they search wide, "
