@@ -2,11 +2,11 @@
 
 Cheminement assisté de harnais électriques dans des cellules d'hélicoptère.
 
-Le principe : partir d'un chemin géodésique sur la maquette numérique, puis
-faire déplacer les points de ce chemin par une équipe d'agents d'apprentissage
-par renforcement, jusqu'à obtenir un tracé qui respecte les règles
-d'intégration (aucune interférence, distances tenues, rayons de cintrage
-admissibles, fixations tous les 250 mm).
+Le principe : chercher un premier chemin entre deux points dans l'espace libre
+de la maquette numérique, puis faire déplacer les points de ce chemin par une
+équipe d'agents d'apprentissage par renforcement, jusqu'à obtenir un tracé qui
+respecte les règles d'intégration (aucune interférence, distances tenues,
+rayons de cintrage admissibles, fixations tous les 250 mm).
 
 ---
 
@@ -110,6 +110,71 @@ table, une distance uniforme s'applique.
 
 ---
 
+## Le chemin de départ
+
+### Pourquoi plus de géodésique
+
+Le chemin initial était calculé par `PolyData.geodesic`, qui suit la **surface**
+du maillage. Trois problèmes, dont deux invisibles :
+
+1. Une maquette DMU est la fusion de centaines de pièces **disjointes**. La
+   géodésique exige un chemin d'arêtes entre les deux sommets ; entre deux
+   pièces séparées il n'y en a aucun. Sur données réelles elle échouait donc
+   systématiquement, et le code la remplaçait **sans le dire** par une ligne
+   droite. Le « chemin géodésique » n'a jamais existé.
+2. Quand elle aboutit, elle colle à la surface : mesuré sur une maquette de
+   test, **60 points de départ sur 60 en violation de la distance minimale**,
+   à 0 mm de la structure. Les agents passaient leurs premières itérations à
+   décoller un câble qui n'aurait jamais dû y être.
+3. Elle contourne les ouvertures au lieu de les traverser : elle ne connaît
+   que la surface.
+
+La recherche se fait désormais dans l'**espace libre**, sur une grille de
+voxels où le maillage n'est qu'un champ d'obstacles (`core/path_planner.py`).
+Les pièces disjointes ne posent plus de problème, et le chemin naît dans la
+bande de distance visée.
+
+### A\* pondéré, dont le glouton est un cas particulier
+
+La recherche utilise `f = g + w · h`. `w = 1` donne A\* ; `w` grand rend le
+terme `g` négligeable et l'on retrouve la **recherche gloutonne** (*greedy
+best-first search*). Un seul paramètre couvre les deux.
+
+Mais le coût `g` porte ici la préférence pour la bande de distance **et** la
+pénalité de changement de direction. Une recherche gloutonne ne classe que sur
+`h` : ces deux règles lui sont invisibles. Mesuré sur une diagonale en espace
+libre, où la grille offre de nombreux escaliers de même longueur :
+
+| stratégie | pénalité de virage | virage total | cellules explorées |
+|---|---|---|---|
+| Rapide (glouton, w = 12) | 0 → 6 | 135° → **135°** *(sans effet)* | 56 |
+| **Équilibré (w = 1,4)** | 0 → 6 | 1125° → **45°** | 59 |
+| Meilleur chemin (A\*, w = 1) | 0 → 6 | 345° → 132° | 4714 |
+
+Le glouton est le plus rapide et reste utile sur une grande maquette, mais il
+ne sait pas produire de longues lignes droites. « Équilibré » est le défaut :
+ici il fait mieux qu'A\* pour 80 fois moins de calcul, la légère gourmandise
+départageant les chemins que le coût seul laisse à égalité.
+
+### Ce que la recherche garantit
+
+* **Marge de sécurité liée à la grille.** Le champ de distance est mesuré entre
+  centres de cellules ; la surface réelle peut être plus proche d'au plus une
+  demi-diagonale. Cette marge est ajoutée à la distance exigée, sans quoi le
+  chemin frôle les pièces alors que la grille le croit dégagé.
+* **Résolution déduite de la marge visée.** Une cellule plus grande que la
+  distance minimale empêche de longer la structure d'aussi près.
+* **Vérification contre le maillage réel.** La distance minimale du chemin
+  final est mesurée par requête de proximité, pas déduite de la grille, et
+  rapportée telle quelle.
+* **Aucun repli silencieux.** En cas d'échec, le lancement s'interrompt avec la
+  raison : point dans la matière, marge irréalisable, passage introuvable.
+
+La géodésique reste proposée dans l'interface, et prévient désormais quand elle
+se réduit à une ligne droite.
+
+---
+
 ## Les agents
 
 ### Rôles
@@ -203,6 +268,7 @@ core/
   geometry_metrics.py       longueurs, courbure, rectitude, portées libres
   routing_rules.py          règles d'intégration + rapport de conformité
   reward_terms.py           traduction des règles en signal d'apprentissage
+  path_planner.py           recherche du chemin de départ dans l'espace libre
   orchestrator.py           rôles, curseur exploration/exploitation, migrations
   agent_team.py             fabrique des réseaux + superviseur d'équipe
   agent_worker.py           boucle d'optimisation d'un agent
@@ -218,7 +284,7 @@ ui/
   theme.py  i18n.py         charte graphique, traductions FR/EN/DE/ES
   charts.py  viewer3d.py    courbes de progression, vue 3D
   widgets/  pages/          composants et écrans
-tests/                      133 tests hors interface, 30 tests d'interface
+tests/                      161 tests hors interface, 36 tests d'interface
 ```
 
 `core/geometry_metrics.py`, `core/routing_rules.py`, `core/reward_terms.py` et
@@ -230,10 +296,9 @@ PyTorch, sans maillage et sans écran.
 `ui/main_window.py`, `ui/pages/extraction_view.py`, `ui/pages/agent_view.py`,
 `controller/controller.py` et `core/controller/controller.py` sont l'ancienne
 interface et son contrôleur. Ils ne sont plus appelés par `main.py`. Les deux
-contrôleurs sont deux copies quasi identiques du même fichier ; ils importent
-`core.catia_handler`, absent du dépôt, et ne s'importent donc pas en l'état.
-Ils sont conservés pour référence — à supprimer quand la nouvelle interface
-vous convient.
+contrôleurs sont deux copies quasi identiques du même fichier. Ils sont
+conservés pour référence — à supprimer quand la nouvelle interface vous
+convient.
 
 `core/sphere_generation.py`, `core/tools.py`, `core/visualize.py`,
 `core/mesh_fusion.py`, `core/HS9019.py`, `core/smooth.py`,
