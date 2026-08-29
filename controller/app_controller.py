@@ -10,7 +10,10 @@ Responsabilités :
 
 L'interface n'importe jamais ni PyTorch ni trimesh : ces dépendances lourdes
 sont chargées ici, à la demande, ce qui garde le démarrage de l'application
-rapide et permet d'afficher un message clair si l'une d'elles manque.
+rapide et permet d'afficher un message clair si l'une d'elles manque. Pour la
+même raison, tkinter n'est importé que dans les fonctions d'export qui ouvrent
+une boîte de dialogue : la logique du contrôleur reste ainsi vérifiable sans
+environnement graphique.
 """
 
 from __future__ import annotations
@@ -20,7 +23,6 @@ import os
 import threading
 import time
 from multiprocessing import Process, Queue
-from tkinter import filedialog
 
 import numpy as np
 
@@ -285,9 +287,11 @@ class AppController:
             point_b=list(values["point_b"]),
             temperature=values["temperature"],
             team_preset=values["team_preset"],
+            start_path=values["start_path"],
             initial_points=values["initial_points"],
             max_points=values["max_points"],
             max_step_mm=values["max_step_mm"],
+            voxel_mm=values["voxel_mm"],
             iterations=values["iterations"],
         )
 
@@ -302,7 +306,6 @@ class AppController:
             import trimesh
 
             from core.agent.config import CONFIG
-            from core.agent.tool import generate_dense_waypoints
             from core.agent_team import TeamSupervisor, build_benchmark_algos
             from core.agent_worker import algo_worker
 
@@ -358,9 +361,11 @@ class AppController:
                 self.orchestrator.team, max_points=values["max_points"]
             )
 
-            waypoints = generate_dense_waypoints(
-                self.point_a, self.point_b, values["initial_points"], mesh=mesh
-            )
+            waypoints = self._build_initial_path(mesh, rules, values)
+            if waypoints is None:
+                self.is_scanning = False
+                self._post(self.view.pages[2].set_running_state, "idle")
+                return
 
             specs = {spec.name: spec for spec in self.orchestrator.team}
             with self.data_lock:
@@ -414,6 +419,51 @@ class AppController:
             self.is_scanning = False
             self._post(self.view.pages[2].set_running_state, "idle")
             self._post(self.view.set_status, f"Échec du lancement : {exc}", "danger")
+
+    def _build_initial_path(self, mesh, rules, values):
+        """Construit le chemin de départ selon la stratégie choisie.
+
+        Renvoie ``None`` en cas d'échec, après avoir dit pourquoi. Aucun repli
+        silencieux : c'est précisément ce qui masquait le fait que la
+        géodésique ne fonctionnait pas sur une maquette faite de pièces
+        disjointes.
+        """
+        from core.agent.tool import generate_dense_waypoints
+        from core.path_planner import PlannerSettings, plan_route
+
+        strategy = values.get("start_path", "balanced")
+        n_points = values["initial_points"]
+
+        if strategy == "geodesic":
+            warnings: list[str] = []
+            waypoints = generate_dense_waypoints(
+                self.point_a, self.point_b, n_points, mesh=mesh,
+                on_warning=warnings.append,
+            )
+            if warnings:
+                self._post(self.view.set_status, warnings[0], "warn")
+            return waypoints
+
+        settings = PlannerSettings(
+            voxel_mm=values.get("voxel_mm") or None,
+        ).with_strategy(strategy)
+
+        result = plan_route(
+            mesh,
+            self.point_a,
+            self.point_b,
+            rules.clearance.default_min_mm,
+            rules.clearance.max_mm,
+            settings,
+            num_points=n_points,
+        )
+
+        if not result.success:
+            self._post(self.view.set_status, result.message(self.view.t.lang), "danger")
+            return None
+
+        self._post(self.view.set_status, result.message(self.view.t.lang), "ok")
+        return result.points
 
     @staticmethod
     def _blank_agent_state(waypoints) -> dict:
@@ -746,6 +796,8 @@ class AppController:
             return ""
 
     def _export_stl(self, agent_name: str, waypoints) -> str:
+        from tkinter import filedialog
+
         import pyvista as pv
 
         path = filedialog.asksaveasfilename(
@@ -762,6 +814,8 @@ class AppController:
         return os.path.basename(path)
 
     def _export_csv(self, agent_name: str, waypoints, crabes) -> str:
+        from tkinter import filedialog
+
         path = filedialog.asksaveasfilename(
             title=self.t("report.export.csv"),
             defaultextension=".csv",
@@ -810,6 +864,8 @@ class AppController:
     def _export_report(self, agent_name: str, report) -> str:
         if report is None:
             return ""
+
+        from tkinter import filedialog
 
         path = filedialog.asksaveasfilename(
             title=self.t("report.export.report"),
