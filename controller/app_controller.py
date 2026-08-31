@@ -65,6 +65,8 @@ class AppController:
         self._detached = False
         #: Dernier état dessiné par agent, pour ne pas redessiner l'identique.
         self._path_signatures: dict[str, tuple] = {}
+        #: Dernier jeu de crabes dessiné, pour ne pas redessiner l'identique.
+        self._clamp_signature: tuple = ()
         #: Scores successifs du meilleur agent, pour détecter la stagnation.
         self._best_scores: list = []
         #: Le modèle de crabe a-t-il pu être chargé ? Renseigné au lancement.
@@ -384,6 +386,7 @@ class AppController:
                 for f in scan_result.fixations
             ]
             self._post(self.view.pages[2].show_fixation_scan, scan_result)
+            self._post(self._draw_fixations, scan_result)
 
             self.shared_state = {
                 "is_playing": False,
@@ -460,47 +463,138 @@ class AppController:
     def _build_initial_path(self, mesh, rules, values):
         """Construit le chemin de départ selon la stratégie choisie.
 
+        Le trajet est découpé en tronçons par les **points de passage imposés**
+        — les encoches des peignes détectés, quand l'utilisateur demande à les
+        emprunter. Chaque tronçon est planifié séparément, puis les tronçons
+        sont recollés : c'est ce qui garantit que le chemin passe réellement
+        par les fixations, et pas seulement à proximité.
+
         Renvoie ``None`` en cas d'échec, après avoir dit pourquoi. Aucun repli
         silencieux : c'est précisément ce qui masquait le fait que la
         géodésique ne fonctionnait pas sur une maquette faite de pièces
         disjointes.
         """
-        from core.agent.tool import generate_dense_waypoints
+        nodes, forced_straight = self._route_nodes(values)
+        n_points = values["initial_points"]
+
+        # Le budget de points est réparti sur les tronçons au prorata de leur
+        # longueur à vol d'oiseau : un tronçon de 2 m ne doit pas recevoir
+        # autant de points qu'une traversée d'encoche de 5 cm.
+        spans = [
+            float(np.linalg.norm(np.asarray(b) - np.asarray(a)))
+            for a, b in zip(nodes[:-1], nodes[1:])
+        ]
+        total_span = sum(spans) or 1.0
+
+        pieces = []
+        messages = []
+        for index, (a, b) in enumerate(zip(nodes[:-1], nodes[1:])):
+            share = max(4, int(round(n_points * spans[index] / total_span)))
+
+            if index in forced_straight:
+                # Traversée d'une encoche : une ligne droite, sans détour. Y
+                # appliquer une recherche de chemin ferait contourner le peigne
+                # au lieu de passer dedans.
+                segment = np.linspace(a, b, share, dtype=np.float32)
+            else:
+                segment, message = self._plan_segment(mesh, rules, values, a, b, share)
+                if segment is None:
+                    self._post(self.view.set_status, message, "danger")
+                    return None
+                if message:
+                    messages.append(message)
+            pieces.append(np.asarray(segment, dtype=np.float32))
+
+        # On ne duplique pas le point de jonction entre deux tronçons.
+        points = pieces[0]
+        for piece in pieces[1:]:
+            points = np.vstack([points, piece[1:]])
+
+        if messages:
+            self._post(self.view.set_status, messages[0], "ok")
+        return points.astype(np.float32)
+
+    def _route_nodes(self, values):
+        """Étapes imposées du trajet, de A à B, et tronçons à laisser droits.
+
+        Sans fixations à emprunter, le trajet n'a que deux étapes. Avec, chaque
+        encoche ajoute son couple entrée/sortie, ordonné le long de A→B et
+        orienté dans le sens de la marche : entrer par la sortie d'une encoche
+        obligerait le câble à faire demi-tour dedans.
+        """
+        a = np.asarray(self.point_a, dtype=np.float64)
+        b = np.asarray(self.point_b, dtype=np.float64)
+
+        passages = self._passages_to_use(values)
+        if not passages:
+            return [a, b], set()
+
+        direction = b - a
+        norm = float(np.linalg.norm(direction))
+        direction = direction / norm if norm > 1e-9 else np.array([1.0, 0.0, 0.0])
+
+        ordered = sorted(
+            passages,
+            key=lambda p: float(np.dot(np.asarray(p.center) - a, direction)),
+        )
+
+        nodes = [a]
+        forced_straight = set()
+        for passage in ordered:
+            p_in = np.asarray(passage.p_in, dtype=np.float64)
+            p_out = np.asarray(passage.p_out, dtype=np.float64)
+            # Le côté par lequel on entre est celui qu'on rencontre en premier.
+            if np.dot(p_out - p_in, direction) < 0:
+                p_in, p_out = p_out, p_in
+            nodes.append(p_in)
+            forced_straight.add(len(nodes) - 1)  # tronçon p_in -> p_out
+            nodes.append(p_out)
+        nodes.append(b)
+        return nodes, forced_straight
+
+    def _passages_to_use(self, values):
+        """Passages imposés à emprunter, selon le choix de l'utilisateur."""
+        if not values.get("use_fixations", False):
+            return []
+        result = getattr(self, "scan_result", None)
+        return list(result.passages) if result is not None and result.ran else []
+
+    def _plan_segment(self, mesh, rules, values, a, b, n_points):
+        """Planifie un tronçon. Renvoie ``(points, message)``.
+
+        ``points`` vaut ``None`` en cas d'échec ; ``message`` dit alors
+        pourquoi.
+        """
         from core.path_planner import PlannerSettings, plan_route
 
         strategy = values.get("start_path", "balanced")
-        n_points = values["initial_points"]
+        lang = self.view.t.lang
 
         if strategy == "geodesic":
-            warnings: list[str] = []
-            waypoints = generate_dense_waypoints(
-                self.point_a, self.point_b, n_points, mesh=mesh,
-                on_warning=warnings.append,
-            )
-            if warnings:
-                self._post(self.view.set_status, warnings[0], "warn")
-            return waypoints
+            # Le chemin de surface remplace ``PolyData.geodesic`` : celle-ci
+            # exige un chemin d'arêtes, dont une maquette faite de pièces
+            # disjointes ne dispose jamais. Elle échouait donc et rendait une
+            # corde tendue, ce que l'utilisateur voyait comme « la géodésique
+            # ne marche pas ».
+            from core.surface_path import surface_path
+
+            result = surface_path(mesh, a, b, num_points=n_points)
+            return (result.points, result.message(lang)) if result.success \
+                else (None, result.message(lang))
 
         settings = PlannerSettings(
             voxel_mm=values.get("voxel_mm") or None,
         ).with_strategy(strategy)
 
         result = plan_route(
-            mesh,
-            self.point_a,
-            self.point_b,
+            mesh, a, b,
             rules.clearance.default_min_mm,
             rules.clearance.max_mm,
             settings,
             num_points=n_points,
         )
-
-        if not result.success:
-            self._post(self.view.set_status, result.message(self.view.t.lang), "danger")
-            return None
-
-        self._post(self.view.set_status, result.message(self.view.t.lang), "ok")
-        return result.points
+        return (result.points, result.message(lang)) if result.success \
+            else (None, result.message(lang))
 
     @staticmethod
     def _prepare_agent_meshes(mesh, count: int) -> list:
@@ -624,6 +718,7 @@ class AppController:
         self.shared_state = None
         self._path_signatures.clear()
         self._best_scores.clear()
+        self._clamp_signature = ()
         if self.viewer is not None:
             self.viewer.remove_prefix("traj_")
             self.viewer.remove_prefix("clamp_")
@@ -694,6 +789,79 @@ class AppController:
         if self.point_b is not None:
             self.viewer.show_sphere(self.point_b, "point_b", radius=25.0, color="#D93A45")
         self.viewer.reset_camera()
+        self.viewer.render()
+
+    def _draw_fixations(self, scan_result):
+        """Place les fixations reconnues dans la vue 3D.
+
+        Rien ne les dessinait : le viewer savait masquer les acteurs
+        ``clamp_``, mais aucun n'était jamais créé. L'utilisateur n'avait donc
+        aucun moyen de vérifier ce que le scan avait reconnu.
+
+        Chaque fixation est un repère à sa position ; chaque passage de peigne
+        est matérialisé par son entrée (vert), sa sortie (rouge) et le segment
+        que le câble doit emprunter (jaune) — les mêmes couleurs que dans la
+        liste affichée au-dessus de la vue.
+        """
+        if self.viewer is None or not self.viewer.is_available:
+            return
+        self.viewer.remove_prefix("fixation_")
+        if scan_result is None or not scan_result.ran:
+            self.viewer.render()
+            return
+
+        radius = max(6.0, self.rules.harness.radius_mm if self.rules else 20.0)
+        for index, fixation in enumerate(scan_result.fixations):
+            if fixation.position:
+                self.viewer.show_sphere(
+                    fixation.position, f"fixation_body_{index}",
+                    radius=radius * 1.2, color="#8FA3B8",
+                )
+
+        for index, passage in enumerate(scan_result.passages):
+            self.viewer.show_sphere(passage.p_in, f"fixation_in_{index}",
+                                    radius=radius, color="#1E9E5A")
+            self.viewer.show_sphere(passage.p_out, f"fixation_out_{index}",
+                                    radius=radius, color="#D93A45")
+            self.viewer.show_path([passage.p_in, passage.p_out],
+                                  f"fixation_slot_{index}", color="#E5B300", width=9)
+        self.viewer.render()
+
+    def _draw_clamps(self, crabes):
+        """Place les crabes posés par le meilleur agent, au fil du calcul.
+
+        Ils étaient calculés à chaque itération et pesaient déjà sur la
+        récompense, mais restaient invisibles : rien ne permettait de voir que
+        les agents en posaient.
+        """
+        if self.viewer is None or not self.viewer.is_available:
+            return
+
+        signature = tuple(
+            (round(float(c.get("arc_mm", 0.0)), 1), round(float(c.get("tilt_deg", 0.0)), 1))
+            for c in crabes
+        )
+        if signature == self._clamp_signature:
+            return
+        self._clamp_signature = signature
+
+        self.viewer.remove_prefix("clamp_")
+        radius = max(6.0, self.rules.harness.radius_mm if self.rules else 20.0)
+        for index, crabe in enumerate(crabes):
+            # ``or`` est proscrit ici : ``position`` est un tableau numpy, dont
+            # la valeur de vérité est ambiguë et lève une exception.
+            position = crabe.get("position")
+            if position is None:
+                continue
+            self.viewer.show_sphere(position, f"clamp_{index}",
+                                    radius=radius * 1.1, color="#FFD166")
+
+            # Le pied du crabe, sur la structure : c'est lui qui montre où la
+            # fixation est réellement vissée.
+            seat = crabe.get("surface_position")
+            if seat is not None:
+                self.viewer.show_path([seat, position], f"clamp_leg_{index}",
+                                      color="#FFD166", width=5)
         self.viewer.render()
 
     def _on_viewer_status(self, mode: str, error: str | None):
@@ -809,6 +977,7 @@ class AppController:
         # aucune route réellement obtenue.
         best_state = snapshot.get(best, {}) if best else {}
         advice = self._advise(best_state)
+        self._draw_clamps(best_state.get("crabes") or [])
         lang = self.view.t.lang
 
         agents = []

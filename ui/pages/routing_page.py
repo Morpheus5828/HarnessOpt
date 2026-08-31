@@ -34,6 +34,7 @@ from ui.widgets import (
     PhaseIndicator,
     SliderField,
     StatusPill,
+    ToggleField,
 )
 
 __all__ = ["RoutingPage"]
@@ -153,6 +154,18 @@ class RoutingPage(ctk.CTkFrame):
             text_color=theme.TEXT_FAINT, anchor="w", justify="left", wraplength=440,
         )
         self.lbl_start_path_help.pack(fill="x", pady=(0, SPACE.MD))
+
+        # Emprunter les fixations existantes est un choix d'intégration, pas un
+        # détail : le câble qui les traverse est contraint de passer là, ce qui
+        # peut rallonger le trajet. L'utilisateur doit pouvoir le refuser.
+        self.f_use_fixations = ToggleField(
+            self.card_strategy.body,
+            label=t("routing.use_fixations"),
+            help_text=t("routing.use_fixations.help"),
+            value=bool(saved.get("use_fixations", True)),
+            on_change=lambda v: self.app.remember(use_fixations=bool(v)),
+        )
+        self.f_use_fixations.pack(fill="x", pady=(0, SPACE.MD))
 
         self.f_explore = SliderField(
             self.card_strategy.body,
@@ -467,6 +480,7 @@ class RoutingPage(ctk.CTkFrame):
             "point_b": self.f_target.get(),
             "team_preset": self.f_team.get(),
             "start_path": self.f_start_path.get(),
+            "use_fixations": self.f_use_fixations.get(),
             "temperature": self.f_explore.get(),
             "initial_points": int(self.f_points.get(48)),
             "max_points": int(self.f_max_points.get(150)),
@@ -585,10 +599,12 @@ class RoutingPage(ctk.CTkFrame):
         colour = theme.ok if result.n_fixations else theme.TEXT_SOFT
         self.lbl_scan.configure(text=f"🔎  {result.message(lang)}", text_color=colour)
 
-        for passage in result.passages[:MAX_LISTED_PASSAGES]:
+        # Numérotation continue : l'index d'un passage est propre à son peigne,
+        # deux peignes à une encoche porteraient donc tous deux le n° 1.
+        for number, passage in enumerate(result.passages[:MAX_LISTED_PASSAGES], start=1):
             ctk.CTkLabel(
-                self.scan_passages, text=passage.format(lang), font=FONT.CODE,
-                text_color=theme.TEXT_SOFT, anchor="w",
+                self.scan_passages, text=passage.format(lang, number=number),
+                font=FONT.CODE, text_color=theme.TEXT_SOFT, anchor="w",
             ).pack(fill="x")
 
         remaining = result.n_passages - MAX_LISTED_PASSAGES
@@ -638,6 +654,7 @@ class RoutingPage(ctk.CTkFrame):
             [(k, v[label_key]) for k, v in TEAM_PRESETS.items()], self.f_team.get()
         )
         self.f_start_path.set_label(t("routing.start_path"), t("routing.start_path.help"))
+        self.f_use_fixations.set_label(t("routing.use_fixations"), t("routing.use_fixations.help"))
         self.f_start_path.set_options(self._start_path_options(), self.f_start_path.get())
         self._on_start_path_changed(self.f_start_path.get())
         self.f_explore.set_label(t("routing.explore"), t("routing.explore.help"))
