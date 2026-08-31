@@ -89,19 +89,21 @@ class AppWindow(ctk.CTk):
         brand = ctk.CTkFrame(header, fg_color="transparent")
         brand.grid(row=0, column=0, sticky="w", padx=(0, SPACE.XL))
 
+        # La marque tient sur une seule ligne : la baseline qui la doublait
+        # n'apprenait rien à qui utilise l'outil, et volait de la hauteur à la
+        # zone de travail sur chaque écran.
         ctk.CTkLabel(
             brand, text="🚁 HarnessOpt", font=FONT.H1, text_color=theme.accent, anchor="w"
-        ).pack(anchor="w")
-
-        self.lbl_tagline = ctk.CTkLabel(
-            brand, text=self.t("app.tagline"), font=FONT.TINY,
-            text_color=theme.TEXT_FAINT, anchor="w",
-        )
-        self.lbl_tagline.pack(anchor="w")
+        ).pack(anchor="w", pady=(SPACE.XS, SPACE.XS))
 
         self.stepper = Stepper(header, 4, on_select=self.show_step)
         self.stepper.grid(row=0, column=1, sticky="ew")
         self._refresh_stepper_texts()
+
+        # Filet de séparation : sans lui, l'en-tête et la page se confondent.
+        ctk.CTkFrame(header, height=1, fg_color=theme.BORDER).grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=(SPACE.MD, 0)
+        )
 
     def _build_pages(self):
         self.container = ctk.CTkFrame(self, fg_color="transparent")
@@ -121,11 +123,28 @@ class AppWindow(ctk.CTk):
         bar = ctk.CTkFrame(self, height=30, fg_color=current().SURFACE, corner_radius=0)
         bar.grid(row=2, column=0, sticky="ew")
 
+        # Une pastille colorée double la couleur du texte. Un message d'erreur
+        # se distinguait jusqu'ici d'un message ordinaire par la seule teinte
+        # des caractères, ce qui est illisible pour une part non négligeable
+        # des utilisateurs, et invisible du coin de l'œil pour tous.
+        self.status_dot = ctk.CTkFrame(
+            bar, width=10, height=10, corner_radius=5, fg_color=theme.TEXT_FAINT
+        )
+        self.status_dot.pack(side="left", padx=(SPACE.LG, SPACE.SM))
+        self.status_dot.pack_propagate(False)
+
         self.lbl_status = ctk.CTkLabel(
             bar, text=self.t("app.ready"), font=FONT.SMALL,
             text_color=theme.TEXT_SOFT, anchor="w",
         )
-        self.lbl_status.pack(side="left", padx=SPACE.LG, pady=SPACE.XS)
+        self.lbl_status.pack(side="left", pady=SPACE.XS)
+
+        # Rappel de l'étape courante : sur un écran large, le fil d'étapes est
+        # loin du regard une fois qu'on travaille en bas de page.
+        self.lbl_step = ctk.CTkLabel(
+            bar, text="", font=FONT.TINY, text_color=theme.TEXT_FAINT, anchor="e"
+        )
+        self.lbl_step.pack(side="right", padx=(0, SPACE.MD))
 
         self.lbl_cache = ctk.CTkLabel(
             bar, text="", font=FONT.TINY, text_color=theme.TEXT_FAINT, anchor="e"
@@ -212,6 +231,7 @@ class AppWindow(ctk.CTk):
             page.grid_forget()
         self.pages[index].grid(row=0, column=0, sticky="nsew")
         self.stepper.set_current(index)
+        self._refresh_step_label()
 
         if self.controller is not None:
             self.controller.on_step_shown(index)
@@ -230,9 +250,10 @@ class AppWindow(ctk.CTk):
         self.t.set_language(code)
         self.remember(language=self.t.lang)
         self.title(self.t("app.title"))
-        self.lbl_tagline.configure(text=self.t("app.tagline"))
         self._build_menu()
         self._refresh_stepper_texts()
+        self._refresh_step_label()
+        self.refresh_cache_label()
         for page in self.pages.values():
             if hasattr(page, "update_language"):
                 page.update_language()
@@ -270,6 +291,15 @@ class AppWindow(ctk.CTk):
             "ok": theme.ok, "warn": theme.warn, "danger": theme.danger, "info": theme.accent
         }.get(tone, theme.TEXT_SOFT)
         self.lbl_status.configure(text=message, text_color=color)
+        self.status_dot.configure(fg_color=color)
+
+    def _refresh_step_label(self):
+        """Rappelle l'étape courante dans la barre d'état."""
+        keys = ("step.project", "step.rules", "step.routing", "step.report")
+        index = max(0, min(len(keys) - 1, self.current_step))
+        self.lbl_step.configure(
+            text=f"{self.t('stepper.step')} {index + 1}/4 — {self.t(keys[index])}"
+        )
 
     def refresh_cache_label(self):
         self.lbl_cache.configure(

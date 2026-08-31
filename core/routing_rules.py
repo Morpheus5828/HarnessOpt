@@ -46,6 +46,10 @@ __all__ = [
     "RouteReport",
     "evaluate_route",
     "DEFAULT_FAMILY_CLEARANCE",
+    "RULE_CATALOG",
+    "RULE_IDS",
+    "ALL_RULES",
+    "rule_info",
 ]
 
 
@@ -55,6 +59,141 @@ class Severity:
     BLOCKING = "blocking"  # rédhibitoire : la route ne peut pas être livrée
     MAJOR = "major"        # à corriger : la route est livrable sous réserve
     MINOR = "minor"        # qualité : la route est acceptable mais perfectible
+
+
+@dataclass(frozen=True)
+class RuleInfo:
+    """Fiche d'identité d'une règle, telle que présentée à l'utilisateur.
+
+    Elle sert à construire la page « Règles » sans y recopier de libellés :
+    ajouter une règle au catalogue suffit à la faire apparaître à l'écran avec
+    sa case à cocher.
+    """
+
+    rule_id: str
+    label_fr: str
+    label_en: str
+    help_fr: str
+    help_en: str
+    severity: str
+    #: Famille de récompense à neutraliser si la règle est décochée.
+    reward_key: str = ""
+
+    def label(self, lang: str = "FR") -> str:
+        return self.label_en if str(lang).upper().startswith("EN") else self.label_fr
+
+    def help(self, lang: str = "FR") -> str:
+        return self.help_en if str(lang).upper().startswith("EN") else self.help_fr
+
+
+#: Toutes les règles connues, dans l'ordre d'affichage. C'est la seule liste
+#: qui fasse foi : l'interface, le moteur d'évaluation et la récompense s'y
+#: réfèrent tous, ce qui interdit qu'une règle soit cochable sans être
+#: réellement appliquée.
+RULE_CATALOG: tuple[RuleInfo, ...] = (
+    RuleInfo(
+        "clash",
+        "Aucune interférence avec la structure",
+        "No interference with the structure",
+        "Le câble ne touche ni ne traverse aucune pièce. Décocher cette règle "
+        "revient à accepter des clashs : à ne faire que pour une étude "
+        "exploratoire.",
+        "The cable neither touches nor crosses any part. Unticking this means "
+        "accepting clashes: exploratory studies only.",
+        Severity.BLOCKING,
+        "clash",
+    ),
+    RuleInfo(
+        "clearance_min",
+        "Distance minimale à la structure",
+        "Minimum clearance to structure",
+        "Le câble reste au moins à la distance minimale de chaque pièce, "
+        "renforcée pour les familles qui l'exigent.",
+        "The cable stays at least the minimum distance from every part, "
+        "increased for the families that require it.",
+        Severity.BLOCKING,
+        "clearance",
+    ),
+    RuleInfo(
+        "clearance_max",
+        "Câble maintenu à portée de la structure",
+        "Cable kept within reach of structure",
+        "Le câble ne s'éloigne pas au-delà de la distance maximale : au-delà, "
+        "plus rien ne permet de le fixer.",
+        "The cable never drifts beyond the maximum distance, past which "
+        "nothing can hold it.",
+        Severity.MAJOR,
+        "clearance",
+    ),
+    RuleInfo(
+        "free_span",
+        "Pas de traversée dans le vide",
+        "No unsupported crossing",
+        "Le câble ne traverse pas un espace vide sur une longueur où il ne "
+        "pourrait être tenu.",
+        "The cable does not cross empty space over a length where it could "
+        "not be held.",
+        Severity.MAJOR,
+        "free_span",
+    ),
+    RuleInfo(
+        "bend_radius",
+        "Rayon de cintrage admissible",
+        "Allowable bend radius",
+        "Aucun coude plus serré que le rayon de cintrage minimal du toron. "
+        "C'est cette règle qui garantit un câble lisse plutôt que plié.",
+        "No bend tighter than the harness minimum bend radius. This is the "
+        "rule that yields a smooth cable rather than a kinked one.",
+        Severity.BLOCKING,
+        "bend",
+    ),
+    RuleInfo(
+        "fixation_pitch",
+        "Une fixation au moins tous les N mm",
+        "A fixation at least every N mm",
+        "Un point de fixation existant ou un crabe posé par l'agent au moins "
+        "tous les N millimètres.",
+        "An existing fixation point, or a clamp placed by the agent, at least "
+        "every N millimetres.",
+        Severity.MAJOR,
+        "fixation",
+    ),
+    RuleInfo(
+        "fixation_parallel",
+        "Crabes posés à plat sur la structure",
+        "Clamps seated flat on the structure",
+        "L'embase de chaque crabe reste parallèle à la structure, à la "
+        "tolérance de pose près.",
+        "Every clamp base stays parallel to the structure, within the seating "
+        "tolerance.",
+        Severity.MAJOR,
+        "fixation",
+    ),
+    RuleInfo(
+        "straightness",
+        "Tracé droit le plus longtemps possible",
+        "Straight run kept as long as possible",
+        "Le câble privilégie les longues portions rectilignes plutôt qu'une "
+        "succession de petits virages.",
+        "The cable favours long straight runs over a succession of small "
+        "turns.",
+        Severity.MINOR,
+        "straight",
+    ),
+)
+
+#: Identifiants des règles, dans l'ordre du catalogue.
+RULE_IDS: tuple[str, ...] = tuple(info.rule_id for info in RULE_CATALOG)
+
+#: Jeu complet : toutes les règles appliquées. C'est le comportement par défaut.
+ALL_RULES: frozenset = frozenset(RULE_IDS)
+
+_RULE_BY_ID = {info.rule_id: info for info in RULE_CATALOG}
+
+
+def rule_info(rule_id: str) -> RuleInfo | None:
+    """Fiche d'une règle, ou ``None`` si l'identifiant est inconnu."""
+    return _RULE_BY_ID.get(rule_id)
 
 
 #: Distance minimale (mm) entre le câble et chaque famille de pièces du DMU.
@@ -210,6 +349,40 @@ class RoutingRules:
     straight_tol_deg: float = 3.0
     #: Part de longueur droite visée (indicateur de qualité, 0..1).
     target_straight_ratio: float = 0.6
+    #: Règles réellement appliquées. Par défaut toutes ; l'utilisateur peut en
+    #: décocher depuis la page « Règles ». Une règle absente n'est ni évaluée,
+    #: ni comptée dans le classement, ni récompensée : la décocher la retire
+    #: vraiment du problème, elle ne se contente pas de disparaître du rapport.
+    enabled_rules: frozenset = ALL_RULES
+
+    def __post_init__(self):
+        # Tolère une liste ou un ensemble, et ignore les identifiants inconnus
+        # afin qu'un réglage enregistré par une version antérieure reste lisible.
+        self.enabled_rules = frozenset(self.enabled_rules) & ALL_RULES
+
+    def is_enabled(self, rule_id: str) -> bool:
+        """La règle est-elle appliquée ?"""
+        return rule_id in self.enabled_rules
+
+    def with_rules(self, enabled) -> "RoutingRules":
+        """Copie des règles avec un autre jeu de règles actives."""
+        return replace(self, enabled_rules=frozenset(enabled))
+
+    def reward_scale(self) -> dict:
+        """Multiplicateurs de récompense induits par les règles décochées.
+
+        Une famille de récompense n'est neutralisée que si *toutes* les règles
+        qui s'y rattachent sont décochées : décocher la seule distance maximale
+        ne doit pas supprimer la pression qui éloigne le câble des pièces.
+        """
+        scale: dict[str, float] = {}
+        for info in RULE_CATALOG:
+            if not info.reward_key:
+                continue
+            scale.setdefault(info.reward_key, 0.0)
+            if self.is_enabled(info.rule_id):
+                scale[info.reward_key] = 1.0
+        return scale
 
     @property
     def free_span_limit_mm(self) -> float:
@@ -249,6 +422,8 @@ class RouteReport:
 
     checks: list[RuleCheck]
     kpis: dict
+    #: Règles appliquées lors de cette évaluation. ``None`` = toutes.
+    enabled_rules: frozenset | None = None
 
     @property
     def is_compliant(self) -> bool:
@@ -284,22 +459,36 @@ class RouteReport:
         un clash contre un peu de lissage.
         """
         k = self.kpis
+        active = self.enabled_rules if self.enabled_rules is not None else ALL_RULES
+
+        def on(rule_id: str, value: float) -> float:
+            """Neutralise le critère si la règle correspondante est décochée."""
+            return value if rule_id in active else 0.0
+
         return (
-            int(k.get("n_clashes", 0)),
-            int(k.get("n_margin_violations", 0)),
-            int(k.get("n_bend_violations", 0)),
-            round(float(k.get("worst_support_gap_mm", 0.0)), 1),
-            round(float(k.get("longest_free_span_mm", 0.0)), 1),
-            round(-float(k.get("straight_ratio", 0.0)), 4),
-            round(float(k.get("total_turning_deg", 0.0)), 1),
+            on("clash", int(k.get("n_clashes", 0))),
+            on("clearance_min", int(k.get("n_margin_violations", 0))),
+            on("clearance_max", int(k.get("n_floating_points", 0))),
+            on("bend_radius", int(k.get("n_bend_violations", 0))),
+            on("fixation_pitch", round(float(k.get("worst_support_gap_mm", 0.0)), 1)),
+            on("fixation_parallel", int(k.get("n_tilted_clamps", 0))),
+            on("free_span", round(float(k.get("longest_free_span_mm", 0.0)), 1)),
+            on("straightness", round(-float(k.get("straight_ratio", 0.0)), 4)),
+            on("straightness", round(float(k.get("total_turning_deg", 0.0)), 1)),
+            # La longueur reste toujours départageante : elle n'est pas une
+            # règle d'intégration mais le critère de dernier recours entre
+            # deux routes également conformes.
             round(float(k.get("length_mm", 0.0)), 1),
         )
 
     def to_dict(self) -> dict:
         """Forme sérialisable, pour l'export du rapport."""
+        active = self.enabled_rules if self.enabled_rules is not None else ALL_RULES
         return {
             "compliant": self.is_compliant,
             "deliverable": self.is_deliverable,
+            "enabled_rules": sorted(active),
+            "disabled_rules": sorted(ALL_RULES - active),
             "kpis": dict(self.kpis),
             "checks": [
                 {
@@ -622,4 +811,9 @@ def evaluate_route(
         )
     )
 
-    return RouteReport(checks=checks, kpis=kpis)
+    # Les règles décochées sont retirées ici, une fois pour toutes. Les
+    # indicateurs, eux, restent tous calculés : l'utilisateur qui a décoché une
+    # règle veut souvent continuer à voir la valeur mesurée, simplement sans
+    # qu'elle décide de la conformité ni du classement.
+    checks = [check for check in checks if rules.is_enabled(check.rule_id)]
+    return RouteReport(checks=checks, kpis=kpis, enabled_rules=rules.enabled_rules)

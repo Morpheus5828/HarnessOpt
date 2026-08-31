@@ -12,6 +12,7 @@ from ui.widgets.fields import (
     SliderField,
     ToggleField,
 )
+from ui.widgets.rules import RuleToggle, RuleToggleList
 from ui.widgets.stepper import Stepper
 
 __all__ = [
@@ -27,6 +28,8 @@ __all__ = [
     "LabeledEntry",
     "NumberField",
     "PathField",
+    "RuleToggle",
+    "RuleToggleList",
     "PhaseIndicator",
     "SectionTitle",
     "SliderField",

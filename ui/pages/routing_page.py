@@ -20,6 +20,7 @@ from __future__ import annotations
 import customtkinter as ctk
 
 from core.orchestrator import ROLES, TEAM_PRESETS, ExplorationPolicy, Phase
+from core.path_planner import STRATEGIES
 from ui.theme import FONT, SPACE, current
 from ui.widgets import (
     AgentBoard,
@@ -131,6 +132,24 @@ class RoutingPage(ctk.CTkFrame):
         )
         self.lbl_team_help.pack(fill="x", pady=(0, SPACE.MD))
 
+        # Chemin de départ : c'est un vrai arbitrage vitesse / qualité, on le
+        # laisse donc à l'utilisateur plutôt que de le figer.
+        self.f_start_path = ChoiceField(
+            self.card_strategy.body,
+            label=t("routing.start_path"),
+            help_text=t("routing.start_path.help"),
+            options=self._start_path_options(),
+            value=saved.get("start_path", "balanced"),
+            on_change=self._on_start_path_changed,
+        )
+        self.f_start_path.pack(fill="x", pady=(0, SPACE.SM))
+
+        self.lbl_start_path_help = ctk.CTkLabel(
+            self.card_strategy.body, text="", font=FONT.SMALL,
+            text_color=theme.TEXT_FAINT, anchor="w", justify="left", wraplength=440,
+        )
+        self.lbl_start_path_help.pack(fill="x", pady=(0, SPACE.MD))
+
         self.f_explore = SliderField(
             self.card_strategy.body,
             label=t("routing.explore"),
@@ -193,6 +212,14 @@ class RoutingPage(ctk.CTkFrame):
         )
         self.f_step.pack(fill="x", pady=(0, SPACE.MD))
 
+        self.f_voxel = NumberField(
+            self.card_advanced.body, label="Résolution de la recherche",
+            help_text=("Taille des cellules explorées pour trouver le chemin de départ. "
+                       "0 = déduite de la distance minimale. Plus fin = plus précis, plus lent."),
+            value=float(saved.get("voxel_mm", 0.0)), unit="mm", entry_width=100,
+        )
+        self.f_voxel.pack(fill="x", pady=(0, SPACE.MD))
+
         self.f_iterations = NumberField(
             self.card_advanced.body, label="Nombre d'itérations",
             help_text="Le calcul s'arrête de lui-même s'il converge avant.",
@@ -201,6 +228,7 @@ class RoutingPage(ctk.CTkFrame):
         self.f_iterations.pack(fill="x")
 
         self._on_team_changed(self.f_team.get())
+        self._on_start_path_changed(self.f_start_path.get())
         self.f_explore.refresh_value_label()
 
     # -- colonne de droite : ce que l'utilisateur observe -----------------
@@ -335,6 +363,21 @@ class RoutingPage(ctk.CTkFrame):
     def _format_temperature(self, value: float) -> str:
         return ExplorationPolicy(value).label(self.app.t.lang)
 
+    def _start_path_options(self):
+        key = "label_en" if self.app.t.is_english else "label_fr"
+        options = [(name, spec[key]) for name, spec in STRATEGIES.items()]
+        options.append(("geodesic", self.t("routing.start_path.geodesic")))
+        return options
+
+    def _on_start_path_changed(self, key: str):
+        if key == "geodesic":
+            text = self.t("routing.start_path.geodesic.help")
+        else:
+            spec = STRATEGIES.get(key, {})
+            text = spec.get("help_en" if self.app.t.is_english else "help_fr", "")
+        self.lbl_start_path_help.configure(text=text)
+        self.app.remember(start_path=key)
+
     def _on_team_changed(self, key: str):
         preset = TEAM_PRESETS.get(key, {})
         help_key = "help_en" if self.app.t.is_english else "help_fr"
@@ -381,10 +424,12 @@ class RoutingPage(ctk.CTkFrame):
             "point_a": self.f_source.get(),
             "point_b": self.f_target.get(),
             "team_preset": self.f_team.get(),
+            "start_path": self.f_start_path.get(),
             "temperature": self.f_explore.get(),
             "initial_points": int(self.f_points.get(48)),
             "max_points": int(self.f_max_points.get(150)),
             "max_step_mm": self.f_step.get(25.0),
+            "voxel_mm": self.f_voxel.get(0.0),
             "iterations": int(self.f_iterations.get(500)),
         }
 
@@ -487,6 +532,9 @@ class RoutingPage(ctk.CTkFrame):
         self.f_team.set_options(
             [(k, v[label_key]) for k, v in TEAM_PRESETS.items()], self.f_team.get()
         )
+        self.f_start_path.set_label(t("routing.start_path"), t("routing.start_path.help"))
+        self.f_start_path.set_options(self._start_path_options(), self.f_start_path.get())
+        self._on_start_path_changed(self.f_start_path.get())
         self.f_explore.set_label(t("routing.explore"), t("routing.explore.help"))
         self.f_explore.set_end_labels(t("routing.explore.left"), t("routing.explore.right"))
         self.f_explore.refresh_value_label()

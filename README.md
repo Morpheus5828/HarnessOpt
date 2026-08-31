@@ -2,11 +2,11 @@
 
 Cheminement assisté de harnais électriques dans des cellules d'hélicoptère.
 
-Le principe : partir d'un chemin géodésique sur la maquette numérique, puis
-faire déplacer les points de ce chemin par une équipe d'agents d'apprentissage
-par renforcement, jusqu'à obtenir un tracé qui respecte les règles
-d'intégration (aucune interférence, distances tenues, rayons de cintrage
-admissibles, fixations tous les 250 mm).
+Le principe : chercher un premier chemin entre deux points dans l'espace libre
+de la maquette numérique, puis faire déplacer les points de ce chemin par une
+équipe d'agents d'apprentissage par renforcement, jusqu'à obtenir un tracé qui
+respecte les règles d'intégration (aucune interférence, distances tenues,
+rayons de cintrage admissibles, fixations tous les 250 mm).
 
 ---
 
@@ -40,7 +40,7 @@ Un assistant en quatre étapes, qui se déverrouillent au fur et à mesure.
 | Étape | Ce qu'on y fait |
 |---|---|
 | **1. Projet** | Désigner le dossier de STL (ou lancer l'export CATIA), assembler la maquette, voir la répartition des pièces par famille. |
-| **2. Règles** | Régler diamètre du toron, rayon de cintrage, distances mini/maxi, distances renforcées par famille, pas entre fixations. |
+| **2. Règles** | Cocher les règles à appliquer, puis régler diamètre du toron, rayon de cintrage, distances mini/maxi, distances renforcées par famille, pas entre fixations. |
 | **3. Cheminement** | Poser départ et arrivée, choisir une équipe d'agents et le réglage exploration/exploitation, lancer, suivre en direct. |
 | **4. Rapport** | Lire le verdict règle par règle, exporter en STL, CSV ou JSON, réinsérer le faisceau dans le document CATIA ouvert. |
 
@@ -77,6 +77,28 @@ agent peut converger vers une route que l'intégrateur refuserait.
 | Crabes posés à plat | majeure | écart angulaire embase / structure |
 | Tracé rectiligne sur la majeure partie | qualité | part de longueur parcourue en ligne droite |
 
+### Choisir les règles à appliquer
+
+Chaque règle du tableau ci-dessus porte une case à cocher en tête de la page
+*Règles*. La décocher la retire **réellement** du problème, et pas seulement du
+rapport : elle cesse d'être évaluée, cesse de compter dans le classement des
+agents, et cesse de peser sur la récompense. C'est cette dernière propriété qui
+importe — une règle qui disparaît de l'écran tout en continuant à tirer sur les
+agents produirait un comportement incompréhensible.
+
+Une famille de récompense n'est neutralisée que si *toutes* les règles qui s'y
+rattachent sont décochées. Décocher la seule distance maximale ne supprime donc
+pas la pression qui maintient le câble à distance des pièces, puisque la
+distance minimale, elle, reste demandée.
+
+Décocher une règle rédhibitoire — « aucune interférence », typiquement — est
+possible pour une étude exploratoire, mais l'application prévient au moment du
+clic que la route obtenue pourra ne pas être livrable.
+
+Le catalogue des règles vit dans `RULE_CATALOG` (`core/routing_rules.py`) :
+ajouter une règle à ce tuple suffit à la faire apparaître à l'écran avec sa case
+à cocher, son libellé bilingue et sa gravité.
+
 ### Le rayon de cintrage
 
 Le lissage était auparavant jugé sur le cosinus de l'angle entre deux segments
@@ -107,6 +129,90 @@ L'étape de fusion produit une table « face → famille DMU »
 à la pièce réellement survolée : 70 mm au-dessus d'une hydraulique haute
 pression, 20 mm le long d'une ligne d'air chaud, 10 mm ailleurs. Sans cette
 table, une distance uniforme s'applique.
+
+---
+
+## Le chemin de départ
+
+### Pourquoi plus de géodésique
+
+Le chemin initial était calculé par `PolyData.geodesic`, qui suit la **surface**
+du maillage. Trois problèmes, dont deux invisibles :
+
+1. Une maquette DMU est la fusion de centaines de pièces **disjointes**. La
+   géodésique exige un chemin d'arêtes entre les deux sommets ; entre deux
+   pièces séparées il n'y en a aucun. Sur données réelles elle échouait donc
+   systématiquement, et le code la remplaçait **sans le dire** par une ligne
+   droite. Le « chemin géodésique » n'a jamais existé.
+2. Quand elle aboutit, elle colle à la surface : mesuré sur une maquette de
+   test, **60 points de départ sur 60 en violation de la distance minimale**,
+   à 0 mm de la structure. Les agents passaient leurs premières itérations à
+   décoller un câble qui n'aurait jamais dû y être.
+3. Elle contourne les ouvertures au lieu de les traverser : elle ne connaît
+   que la surface.
+
+La recherche se fait désormais dans l'**espace libre**, sur une grille de
+voxels où le maillage n'est qu'un champ d'obstacles (`core/path_planner.py`).
+Les pièces disjointes ne posent plus de problème, et le chemin naît dans la
+bande de distance visée.
+
+### A\* pondéré, dont le glouton est un cas particulier
+
+La recherche utilise `f = g + w · h`. `w = 1` donne A\* ; `w` grand rend le
+terme `g` négligeable et l'on retrouve la **recherche gloutonne** (*greedy
+best-first search*). Un seul paramètre couvre les deux.
+
+Mais le coût `g` porte ici la préférence pour la bande de distance **et** la
+pénalité de changement de direction. Une recherche gloutonne ne classe que sur
+`h` : ces deux règles lui sont invisibles. Mesuré sur une diagonale en espace
+libre, où la grille offre de nombreux escaliers de même longueur :
+
+| stratégie | pénalité de virage | virage total | cellules explorées |
+|---|---|---|---|
+| Rapide (glouton, w = 12) | 0 → 6 | 135° → **135°** *(sans effet)* | 56 |
+| **Équilibré (w = 1,4)** | 0 → 6 | 1125° → **45°** | 59 |
+| Meilleur chemin (A\*, w = 1) | 0 → 6 | 345° → 132° | 4714 |
+
+Le glouton est le plus rapide et reste utile sur une grande maquette, mais il
+ne sait pas produire de longues lignes droites. « Équilibré » est le défaut :
+ici il fait mieux qu'A\* pour 80 fois moins de calcul, la légère gourmandise
+départageant les chemins que le coût seul laisse à égalité.
+
+### Ce que la recherche garantit
+
+* **Marge de sécurité liée à la grille.** Le champ de distance est mesuré entre
+  centres de cellules ; la surface réelle peut être plus proche d'au plus une
+  demi-diagonale. Cette marge est ajoutée à la distance exigée, sans quoi le
+  chemin frôle les pièces alors que la grille le croit dégagé.
+* **Résolution déduite de la marge visée.** Une cellule plus grande que la
+  distance minimale empêche de longer la structure d'aussi près.
+* **Vérification contre le maillage réel.** La distance minimale du chemin
+  final est mesurée par requête de proximité, pas déduite de la grille, et
+  rapportée telle quelle.
+* **Aucun repli silencieux.** En cas d'échec, le lancement s'interrompt avec la
+  raison : point dans la matière, marge irréalisable, passage introuvable.
+
+La géodésique reste proposée dans l'interface, et prévient désormais quand elle
+se réduit à une ligne droite.
+
+---
+
+## La vue 3D
+
+Elle est incrustée dans l'écran *Cheminement* : glisser pour tourner, molette
+pour zoomer, clic droit pour déplacer. « Ouvrir en grand » ouvre en plus une
+fenêtre VTK native, réellement interactive.
+
+Le point important est architectural. **Tout ce qui touche à VTK vit dans un
+fil de rendu dédié**, qui possède le plotter, reçoit des ordres par une file et
+renvoie des images. L'interface se contente d'afficher la dernière image reçue.
+Aucun appel 3D n'a lieu sur le fil de Tk.
+
+Ce n'est pas une élégance gratuite : construire un `pyvista.Plotter` demande
+**13,6 s** sur une maquette de 800 000 triangles, mesuré. La version précédente
+le faisait sur le fil de l'interface, qui restait donc figée d'autant, puis
+n'affichait jamais la fenêtre ainsi construite — le cadre réservé à la 3D
+restait vide sur toutes les plateformes.
 
 ---
 
@@ -203,6 +309,7 @@ core/
   geometry_metrics.py       longueurs, courbure, rectitude, portées libres
   routing_rules.py          règles d'intégration + rapport de conformité
   reward_terms.py           traduction des règles en signal d'apprentissage
+  path_planner.py           recherche du chemin de départ dans l'espace libre
   orchestrator.py           rôles, curseur exploration/exploitation, migrations
   agent_team.py             fabrique des réseaux + superviseur d'équipe
   agent_worker.py           boucle d'optimisation d'un agent
@@ -216,9 +323,10 @@ controller/
 ui/
   app_window.py             fenêtre principale (assistant 4 étapes)
   theme.py  i18n.py         charte graphique, traductions FR/EN/DE/ES
-  charts.py  viewer3d.py    courbes de progression, vue 3D
+  charts.py                 courbes de progression
+  viewer3d.py               vue 3D incrustée (fil de rendu dédié)
   widgets/  pages/          composants et écrans
-tests/                      133 tests hors interface, 30 tests d'interface
+tests/                      196 tests hors interface, 80 tests d'interface
 ```
 
 `core/geometry_metrics.py`, `core/routing_rules.py`, `core/reward_terms.py` et
@@ -230,10 +338,9 @@ PyTorch, sans maillage et sans écran.
 `ui/main_window.py`, `ui/pages/extraction_view.py`, `ui/pages/agent_view.py`,
 `controller/controller.py` et `core/controller/controller.py` sont l'ancienne
 interface et son contrôleur. Ils ne sont plus appelés par `main.py`. Les deux
-contrôleurs sont deux copies quasi identiques du même fichier ; ils importent
-`core.catia_handler`, absent du dépôt, et ne s'importent donc pas en l'état.
-Ils sont conservés pour référence — à supprimer quand la nouvelle interface
-vous convient.
+contrôleurs sont deux copies quasi identiques du même fichier. Ils sont
+conservés pour référence — à supprimer quand la nouvelle interface vous
+convient.
 
 `core/sphere_generation.py`, `core/tools.py`, `core/visualize.py`,
 `core/mesh_fusion.py`, `core/HS9019.py`, `core/smooth.py`,
@@ -246,9 +353,15 @@ aucun chemin actif.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q                    # règles, géométrie, agents
-xvfb-run -a python -m pytest tests/test_ui.py # interface (Linux sans écran)
+python -m pytest tests/ -q                       # règles, géométrie, agents
+xvfb-run -a python -m pytest tests/test_ui.py \
+                            tests/test_viewer3d.py  # interface et vue 3D
 ```
 
 Les tests d'interface s'ignorent d'eux-mêmes si tkinter, customtkinter ou un
 serveur graphique manquent.
+
+`tests/test_viewer3d.py` fait tourner le vrai fil de rendu sur un plotter
+factice. Il vérifie notamment que `Viewer3D.start()` rend la main en quelques
+millisecondes même quand la construction du contexte 3D traîne : c'est la
+garantie de non-régression du gel décrit plus haut.

@@ -386,8 +386,21 @@ def resample_curve(points, num_points):
     return new_points
 
 
-def generate_dense_waypoints(start, goal, num_points, mesh=None, intermediate_points=None):
+def generate_dense_waypoints(start, goal, num_points, mesh=None, intermediate_points=None,
+                             on_warning=None):
+    """Chemin de départ suivant la surface du maillage (géodésique).
+
+    Args:
+        on_warning: appelé avec un message quand un tronçon géodésique échoue.
+            Sur une maquette faite de pièces disjointes — le cas courant — il
+            n'existe aucun chemin d'arêtes entre deux pièces séparées, et le
+            tronçon se réduit à une ligne droite. Ce repli était silencieux :
+            l'utilisateur croyait obtenir une géodésique et recevait une
+            corde. Voir :mod:`core.path_planner` pour la recherche dans
+            l'espace libre, qui n'a pas cette limite.
+    """
     num_points = int(max(2, num_points))
+    failures = [0]
     if mesh is None:
         return np.linspace(start, goal, num_points, dtype=np.float32)
 
@@ -442,7 +455,8 @@ def generate_dense_waypoints(start, goal, num_points, mesh=None, intermediate_po
                     geo_path = pv_mesh.geodesic(s_idx, e_idx)
                     segment_pts = geo_path.points
                 except Exception:
-                    # ⚠️ Si la surface est coupée, pont en ligne droite activé.
+                    # Surface coupée entre les deux extrémités : pont droit.
+                    failures[0] += 1
                     segment_pts = np.linspace(s_pt, e_pt, 10, dtype=np.float32)
 
             # On évite de dupliquer le point de jonction entre les segments
@@ -450,6 +464,13 @@ def generate_dense_waypoints(start, goal, num_points, mesh=None, intermediate_po
                 all_path_points.extend(segment_pts[1:])
             else:
                 all_path_points.extend(segment_pts)
+
+        if failures[0] and on_warning is not None:
+            on_warning(
+                f"{failures[0]} tronçon(s) géodésique(s) impossible(s) : la maquette est "
+                "faite de pièces disjointes. Ces tronçons sont de simples lignes droites, "
+                "collées à la structure. Préférez une recherche dans l'espace libre."
+            )
 
         # 4. Ré-échantillonnage global
         return resample_curve(np.array(all_path_points), num_points)
