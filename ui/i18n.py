@@ -26,7 +26,6 @@ LANGUAGES: dict[str, str] = {
 FR: dict[str, str] = {
     # -- application --------------------------------------------------
     "app.title": "HarnessOpt — Cheminement de harnais",
-    "app.tagline": "Cheminement assisté de harnais électriques en hélicoptère",
     "app.ready": "Prêt",
     "app.quit": "Quitter",
     "app.quit.confirm": "Voulez-vous quitter l'application ?",
@@ -45,6 +44,7 @@ FR: dict[str, str] = {
     "menu.cache.open": "Ouvrir le dossier de travail",
     "menu.help.about": "À propos",
     # -- étapes -------------------------------------------------------
+    "stepper.step": "Étape",
     "step.project": "Projet",
     "step.project.sub": "Charger la maquette",
     "step.rules": "Règles",
@@ -98,6 +98,8 @@ FR: dict[str, str] = {
         "Ces valeurs définissent ce qu'est un cheminement acceptable. "
         "Elles serviront à la fois à guider les agents et à contrôler le résultat."
     ),
+    "rules.active.title": "Règles appliquées",
+    "rules.active.help": "Décochez une règle pour la retirer du problème : elle cesse d'être évaluée, de compter dans le classement et de guider les agents.",
     "rules.harness": "Le harnais",
     "rules.diameter": "Diamètre du toron",
     "rules.diameter.help": "Diamètre extérieur du faisceau une fois assemblé.",
@@ -188,6 +190,13 @@ FR: dict[str, str] = {
     "routing.view.clamps": "Fixations",
     "routing.view.detach": "Ouvrir en grand",
     "routing.view.attach": "Réintégrer",
+    "routing.view.starting": "Préparation de la vue 3D…",
+    "routing.view.ready": "Vue 3D prête. Glisser pour tourner, molette pour zoomer, clic droit pour déplacer.",
+    "routing.view.unavailable": "Vue 3D indisponible sur ce poste.",
+    "routing.view.still_running": "Le calcul du cheminement, lui, continue normalement.",
+    "routing.view.none": "Aucune vue 3D à ouvrir pour l'instant.",
+    "routing.prepare.mesh": "Préparation des maillages de travail…",
+    "routing.prepare.path": "Recherche du chemin de départ…",
     "routing.charts": "Progression",
     "routing.advanced": "Réglages avancés",
     "routing.advanced.warn": (
@@ -245,7 +254,6 @@ FR: dict[str, str] = {
 
 EN: dict[str, str] = {
     "app.title": "HarnessOpt — Harness routing",
-    "app.tagline": "Assisted routing of helicopter electrical harnesses",
     "app.ready": "Ready",
     "app.quit": "Quit",
     "app.quit.confirm": "Do you want to quit the application?",
@@ -262,6 +270,7 @@ EN: dict[str, str] = {
     "menu.cache.clear": "Clear cache",
     "menu.cache.open": "Open working folder",
     "menu.help.about": "About",
+    "stepper.step": "Step",
     "step.project": "Project",
     "step.project.sub": "Load the mock-up",
     "step.rules": "Rules",
@@ -312,6 +321,8 @@ EN: dict[str, str] = {
         "These values define what an acceptable route is. They guide the agents "
         "and are used to check the result."
     ),
+    "rules.active.title": "Applied rules",
+    "rules.active.help": "Untick a rule to take it out of the problem: it stops being evaluated, stops counting in the ranking and stops guiding the agents.",
     "rules.harness": "The harness",
     "rules.diameter": "Bundle diameter",
     "rules.diameter.help": "Outer diameter of the assembled bundle.",
@@ -398,6 +409,13 @@ EN: dict[str, str] = {
     "routing.view.clamps": "Fixations",
     "routing.view.detach": "Open large",
     "routing.view.attach": "Dock back",
+    "routing.view.starting": "Preparing the 3D view…",
+    "routing.view.ready": "3D view ready. Drag to rotate, scroll to zoom, right-drag to pan.",
+    "routing.view.unavailable": "3D view unavailable on this workstation.",
+    "routing.view.still_running": "Route computation carries on regardless.",
+    "routing.view.none": "No 3D view to open yet.",
+    "routing.prepare.mesh": "Preparing working meshes…",
+    "routing.prepare.path": "Searching for the initial path…",
     "routing.charts": "Progress",
     "routing.advanced": "Advanced settings",
     "routing.advanced.warn": (

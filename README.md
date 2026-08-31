@@ -40,7 +40,7 @@ Un assistant en quatre étapes, qui se déverrouillent au fur et à mesure.
 | Étape | Ce qu'on y fait |
 |---|---|
 | **1. Projet** | Désigner le dossier de STL (ou lancer l'export CATIA), assembler la maquette, voir la répartition des pièces par famille. |
-| **2. Règles** | Régler diamètre du toron, rayon de cintrage, distances mini/maxi, distances renforcées par famille, pas entre fixations. |
+| **2. Règles** | Cocher les règles à appliquer, puis régler diamètre du toron, rayon de cintrage, distances mini/maxi, distances renforcées par famille, pas entre fixations. |
 | **3. Cheminement** | Poser départ et arrivée, choisir une équipe d'agents et le réglage exploration/exploitation, lancer, suivre en direct. |
 | **4. Rapport** | Lire le verdict règle par règle, exporter en STL, CSV ou JSON, réinsérer le faisceau dans le document CATIA ouvert. |
 
@@ -76,6 +76,28 @@ agent peut converger vers une route que l'intégrateur refuserait.
 | Une fixation au moins tous les 250 mm | majeure | plus grand écart entre supports |
 | Crabes posés à plat | majeure | écart angulaire embase / structure |
 | Tracé rectiligne sur la majeure partie | qualité | part de longueur parcourue en ligne droite |
+
+### Choisir les règles à appliquer
+
+Chaque règle du tableau ci-dessus porte une case à cocher en tête de la page
+*Règles*. La décocher la retire **réellement** du problème, et pas seulement du
+rapport : elle cesse d'être évaluée, cesse de compter dans le classement des
+agents, et cesse de peser sur la récompense. C'est cette dernière propriété qui
+importe — une règle qui disparaît de l'écran tout en continuant à tirer sur les
+agents produirait un comportement incompréhensible.
+
+Une famille de récompense n'est neutralisée que si *toutes* les règles qui s'y
+rattachent sont décochées. Décocher la seule distance maximale ne supprime donc
+pas la pression qui maintient le câble à distance des pièces, puisque la
+distance minimale, elle, reste demandée.
+
+Décocher une règle rédhibitoire — « aucune interférence », typiquement — est
+possible pour une étude exploratoire, mais l'application prévient au moment du
+clic que la route obtenue pourra ne pas être livrable.
+
+Le catalogue des règles vit dans `RULE_CATALOG` (`core/routing_rules.py`) :
+ajouter une règle à ce tuple suffit à la faire apparaître à l'écran avec sa case
+à cocher, son libellé bilingue et sa gravité.
 
 ### Le rayon de cintrage
 
@@ -172,6 +194,25 @@ départageant les chemins que le coût seul laisse à égalité.
 
 La géodésique reste proposée dans l'interface, et prévient désormais quand elle
 se réduit à une ligne droite.
+
+---
+
+## La vue 3D
+
+Elle est incrustée dans l'écran *Cheminement* : glisser pour tourner, molette
+pour zoomer, clic droit pour déplacer. « Ouvrir en grand » ouvre en plus une
+fenêtre VTK native, réellement interactive.
+
+Le point important est architectural. **Tout ce qui touche à VTK vit dans un
+fil de rendu dédié**, qui possède le plotter, reçoit des ordres par une file et
+renvoie des images. L'interface se contente d'afficher la dernière image reçue.
+Aucun appel 3D n'a lieu sur le fil de Tk.
+
+Ce n'est pas une élégance gratuite : construire un `pyvista.Plotter` demande
+**13,6 s** sur une maquette de 800 000 triangles, mesuré. La version précédente
+le faisait sur le fil de l'interface, qui restait donc figée d'autant, puis
+n'affichait jamais la fenêtre ainsi construite — le cadre réservé à la 3D
+restait vide sur toutes les plateformes.
 
 ---
 
@@ -282,9 +323,10 @@ controller/
 ui/
   app_window.py             fenêtre principale (assistant 4 étapes)
   theme.py  i18n.py         charte graphique, traductions FR/EN/DE/ES
-  charts.py  viewer3d.py    courbes de progression, vue 3D
+  charts.py                 courbes de progression
+  viewer3d.py               vue 3D incrustée (fil de rendu dédié)
   widgets/  pages/          composants et écrans
-tests/                      161 tests hors interface, 36 tests d'interface
+tests/                      196 tests hors interface, 80 tests d'interface
 ```
 
 `core/geometry_metrics.py`, `core/routing_rules.py`, `core/reward_terms.py` et
@@ -311,9 +353,15 @@ aucun chemin actif.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q                    # règles, géométrie, agents
-xvfb-run -a python -m pytest tests/test_ui.py # interface (Linux sans écran)
+python -m pytest tests/ -q                       # règles, géométrie, agents
+xvfb-run -a python -m pytest tests/test_ui.py \
+                            tests/test_viewer3d.py  # interface et vue 3D
 ```
 
 Les tests d'interface s'ignorent d'eux-mêmes si tkinter, customtkinter ou un
 serveur graphique manquent.
+
+`tests/test_viewer3d.py` fait tourner le vrai fil de rendu sur un plotter
+factice. Il vérifie notamment que `Viewer3D.start()` rend la main en quelques
+millisecondes même quand la construction du contexte 3D traîne : c'est la
+garantie de non-régression du gel décrit plus haut.

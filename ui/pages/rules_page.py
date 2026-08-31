@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import customtkinter as ctk
 
-from core.routing_rules import DEFAULT_FAMILY_CLEARANCE
+from core.routing_rules import ALL_RULES, DEFAULT_FAMILY_CLEARANCE
 from ui.theme import FONT, SPACE, current
-from ui.widgets import Card, NumberField, PathField
+from ui.widgets import Card, NumberField, PathField, RuleToggleList
 
 __all__ = ["RulesPage"]
 
@@ -46,6 +46,25 @@ class RulesPage(ctk.CTkScrollableFrame):
             anchor="w", justify="left", wraplength=820,
         )
         self.lbl_intro.pack(fill="x", pady=(0, SPACE.LG))
+
+        # --- règles appliquées -------------------------------------------
+        # Placée en premier : décider *quelles* règles s'appliquent commande
+        # tout le reste. Régler une distance minimale qu'on a par ailleurs
+        # désactivée n'aurait aucun sens, et l'ordre de l'écran doit refléter
+        # cette dépendance.
+        self.card_active = Card(
+            self, title=t("rules.active.title"),
+            subtitle=t("rules.active.help"), icon="☑️",
+        )
+        self.card_active.pack(fill="x", pady=(0, SPACE.MD))
+
+        self.rule_list = RuleToggleList(
+            self.card_active.body,
+            enabled=set(saved.get("enabled_rules", sorted(ALL_RULES))),
+            on_change=self._on_rule_toggled,
+            lang=self.app.t.lang,
+        )
+        self.rule_list.pack(fill="x")
 
         # --- le harnais ------------------------------------------------
         self.card_harness = Card(self, title=t("rules.harness"), icon="🔌")
@@ -184,6 +203,14 @@ class RulesPage(ctk.CTkScrollableFrame):
         self.app.set_status(self.t("rules.ready"), "ok")
         self.app.show_step(2)
 
+    def _on_rule_toggled(self, _rule_id: str, _value: bool):
+        """Mémorise le jeu de règles dès qu'il change.
+
+        Sans cela, décocher une règle puis revenir à l'étape précédente
+        perdait le réglage sans prévenir.
+        """
+        self.app.remember(enabled_rules=sorted(self.rule_list.get()))
+
     def _refresh_bend(self):
         diameter = self.f_diameter.get(40.0)
         factor = self.f_bend_factor.get(6.0)
@@ -192,6 +219,7 @@ class RulesPage(ctk.CTkScrollableFrame):
         )
 
     def reset_defaults(self):
+        self.rule_list.select_all()
         self.f_diameter.set(40.0)
         self.f_bend_factor.set(6.0)
         self.f_min.set(10.0)
@@ -246,6 +274,7 @@ class RulesPage(ctk.CTkScrollableFrame):
             "fixation_pitch": self.f_pitch.get(250.0),
             "fixation_parallel_tol": self.f_parallel.get(15.0),
             "crabe_stl_path": self.f_clamp_model.get(),
+            "enabled_rules": sorted(self.rule_list.get()),
             "family_clearance": {
                 name: field.get(10.0) for name, field in self._family_fields.items()
             },
@@ -255,6 +284,12 @@ class RulesPage(ctk.CTkScrollableFrame):
         """Incohérences détectées, formulées en langage clair."""
         problems: list[str] = []
         values = self.collect()
+
+        if not values["enabled_rules"]:
+            problems.append(
+                "Aucune règle n'est appliquée : les agents n'auraient rien à respecter."
+            )
+            return problems
 
         if values["harness_diameter"] <= 0:
             problems.append("Le diamètre du toron doit être supérieur à zéro.")
@@ -285,6 +320,9 @@ class RulesPage(ctk.CTkScrollableFrame):
         t = self.t
         self.lbl_title.configure(text=t("rules.title"))
         self.lbl_intro.configure(text=t("rules.intro"))
+        self.card_active.set_title(t("rules.active.title"), "☑️")
+        self.card_active.set_subtitle(t("rules.active.help"))
+        self.rule_list.update_language(self.app.t.lang)
         self.card_harness.set_title(t("rules.harness"), "🔌")
         self.card_clearance.set_title(t("rules.clearance"), "📏")
         self.card_families.set_title(t("rules.families.title"), "🎨")

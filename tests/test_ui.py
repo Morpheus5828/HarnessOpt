@@ -384,3 +384,166 @@ class TestApplication:
         assert page.kpis.tiles["length"].lbl_value.cget("text") != "—"
         page.update_reports({}, [], {})
         assert page.kpis.tiles["length"].lbl_value.cget("text") == "—"
+
+
+class TestReglesActivables:
+    """Cases à cocher de la page « Règles ».
+
+    Ce qui compte ici n'est pas l'apparence de la case mais le fait qu'elle
+    parvienne jusqu'au moteur : une case décochée doit produire un jeu de
+    règles réellement amputé.
+    """
+
+    def test_toutes_les_regles_sont_cochees_au_depart(self, app):
+        from core.routing_rules import ALL_RULES
+
+        assert app.pages[1].rule_list.get() == set(ALL_RULES)
+
+    def test_chaque_regle_du_catalogue_a_sa_ligne(self, app):
+        from core.routing_rules import RULE_IDS
+
+        assert set(app.pages[1].rule_list.rows) == set(RULE_IDS)
+
+    def test_decocher_une_regle_la_retire_de_la_collecte(self, app):
+        page = app.pages[1]
+        page.rule_list.rows["straightness"].set(False)
+        try:
+            assert "straightness" not in page.collect()["enabled_rules"]
+            assert "clash" in page.collect()["enabled_rules"]
+        finally:
+            page.rule_list.select_all()
+
+    def test_le_controleur_construit_des_regles_amputees(self, app):
+        page = app.pages[1]
+        page.rule_list.rows["straightness"].set(False)
+        page.rule_list.rows["free_span"].set(False)
+        try:
+            rules = app.controller.build_rules()
+            assert not rules.is_enabled("straightness")
+            assert not rules.is_enabled("free_span")
+            assert rules.is_enabled("clash")
+        finally:
+            page.rule_list.select_all()
+
+    def test_la_recompense_est_neutralisee_pour_une_famille_entiere(self, app):
+        page = app.pages[1]
+        page.rule_list.rows["fixation_pitch"].set(False)
+        page.rule_list.rows["fixation_parallel"].set(False)
+        try:
+            assert app.controller.build_rules().reward_scale()["fixation"] == 0.0
+        finally:
+            page.rule_list.select_all()
+
+    def test_tout_decocher_est_refuse_par_la_validation(self, app):
+        page = app.pages[1]
+        for row in page.rule_list.rows.values():
+            row.set(False)
+        try:
+            problems = page.validate()
+            assert problems and "règle" in problems[0].lower()
+        finally:
+            page.rule_list.select_all()
+
+    def test_la_remise_a_zero_recoche_tout(self, app):
+        page = app.pages[1]
+        page.rule_list.rows["clash"].set(False)
+        page.reset_defaults()
+        assert page.rule_list.get() == set(page.rule_list.rows)
+
+    def test_le_resume_alerte_quand_une_regle_bloquante_tombe(self, app):
+        page = app.pages[1]
+        page.rule_list.rows["clash"].set(False)
+        page.rule_list._refresh_summary()
+        try:
+            text = page.rule_list.lbl_summary.cget("text").lower()
+            assert "attention" in text
+        finally:
+            page.rule_list.select_all()
+
+    def test_le_resume_est_serein_quand_tout_est_coche(self, app):
+        page = app.pages[1]
+        page.rule_list.select_all()
+        text = page.rule_list.lbl_summary.cget("text").lower()
+        assert "attention" not in text
+
+    def test_une_ligne_decochee_est_grisee(self, app):
+        from ui.theme import current
+
+        page = app.pages[1]
+        row = page.rule_list.rows["straightness"]
+        row.set(False)
+        try:
+            assert row.lbl_name.cget("text_color") == current().TEXT_FAINT
+        finally:
+            page.rule_list.select_all()
+
+    def test_les_lignes_survivent_au_changement_de_langue(self, app):
+        page = app.pages[1]
+        page.rule_list.update_language("EN")
+        try:
+            assert "rule" in page.rule_list.lbl_summary.cget("text").lower()
+        finally:
+            page.rule_list.update_language("FR")
+
+
+class TestEnTeteEtBarreDEtat:
+    """En-tête allégé et barre d'état lisible."""
+
+    def test_la_baseline_a_disparu(self, app):
+        """Le sous-titre sous « HarnessOpt » ne doit plus exister du tout."""
+        assert not hasattr(app, "lbl_tagline")
+
+    def test_la_cle_de_baseline_a_ete_retiree_du_catalogue(self):
+        from ui.i18n import EN, FR
+
+        assert "app.tagline" not in FR
+        assert "app.tagline" not in EN
+
+    def test_la_pastille_suit_la_gravite_du_message(self, app):
+        from ui.theme import current
+
+        theme = current()
+        app.set_status("échec", "danger")
+        assert app.status_dot.cget("fg_color") == theme.danger
+        app.set_status("terminé", "ok")
+        assert app.status_dot.cget("fg_color") == theme.ok
+
+    def test_la_pastille_et_le_texte_disent_la_meme_chose(self, app):
+        app.set_status("attention", "warn")
+        assert app.status_dot.cget("fg_color") == app.lbl_status.cget("text_color")
+
+    def test_un_ton_inconnu_reste_neutre(self, app):
+        from ui.theme import current
+
+        app.set_status("message", "ton_inexistant")
+        assert app.status_dot.cget("fg_color") == current().TEXT_SOFT
+
+    def test_l_etape_courante_est_rappelee(self, app):
+        app.show_step(0)
+        text = app.lbl_step.cget("text")
+        assert "1/4" in text
+        assert "projet" in text.lower()
+
+    def test_le_rappel_d_etape_suit_l_ecran_reellement_affiche(self, app):
+        """Il doit suivre l'écran affiché, pas celui qu'on a demandé.
+
+        Demander une étape verrouillée ne change pas d'écran : le rappel doit
+        alors rester sur l'étape courante, sinon il annoncerait une étape que
+        l'utilisateur n'a pas sous les yeux.
+        """
+        app._display_step(1)
+        assert "2/4" in app.lbl_step.cget("text")
+        app._display_step(0)
+        assert "1/4" in app.lbl_step.cget("text")
+
+    def test_une_etape_verrouillee_ne_change_pas_le_rappel(self, app):
+        app.show_step(0)
+        app.show_step(2)  # cheminement : inaccessible sans maquette
+        assert "1/4" in app.lbl_step.cget("text")
+
+    def test_le_rappel_d_etape_se_traduit(self, app):
+        app.set_language("EN")
+        try:
+            assert "Step" in app.lbl_step.cget("text")
+        finally:
+            app.set_language("FR")

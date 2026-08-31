@@ -135,6 +135,15 @@ def algo_worker(
             role_weights.update(getattr(spec, "weights", {}) or {})
             crabe_focus = crabe_focus or getattr(spec, "role", "") == "fixer"
 
+        # Neutralisation des familles de récompense dont toutes les règles ont
+        # été décochées. Calculée une fois : le jeu de règles ne change pas en
+        # cours de cheminement.
+        rule_scale = rules.reward_scale() if rules is not None else {}
+        # Poser des crabes n'a plus de sens si aucune règle de fixation n'est
+        # demandée : l'agent y consacrerait du temps de calcul pour rien.
+        if rule_scale.get("fixation", 1.0) == 0.0:
+            crabe_focus = False
+
         local_pq = ProximityQuery(mesh)
 
         # Modèle de distances : uniforme par défaut, différencié par famille de
@@ -766,12 +775,16 @@ def algo_worker(
                 # débrancher aucune : un lisseur reste tenu de ne pas percuter
                 # une cloison, il y consacre simplement moins d'effort qu'un
                 # éclaireur. Les poids viennent de core.orchestrator.
-                w_clearance = role_weights.get("clearance", 1.0)
-                w_clash = role_weights.get("clash", 1.0)
-                w_bend = role_weights.get("bend", 1.0)
-                w_straight = role_weights.get("straight", 1.0)
-                w_span = role_weights.get("free_span", 1.0)
-                w_fix = role_weights.get("fixation", 1.0)
+                # Les règles décochées par l'utilisateur sont neutralisées ici :
+                # une règle retirée du rapport doit aussi cesser de tirer sur
+                # l'agent, sinon il continue d'optimiser une contrainte que
+                # personne ne lui demande plus de respecter.
+                w_clearance = role_weights.get("clearance", 1.0) * rule_scale.get("clearance", 1.0)
+                w_clash = role_weights.get("clash", 1.0) * rule_scale.get("clash", 1.0)
+                w_bend = role_weights.get("bend", 1.0) * rule_scale.get("bend", 1.0)
+                w_straight = role_weights.get("straight", 1.0) * rule_scale.get("straight", 1.0)
+                w_span = role_weights.get("free_span", 1.0) * rule_scale.get("free_span", 1.0)
+                w_fix = role_weights.get("fixation", 1.0) * rule_scale.get("fixation", 1.0)
                 w_length = role_weights.get("length", 1.0)
 
                 rewards_batch = (
