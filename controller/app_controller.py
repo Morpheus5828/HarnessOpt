@@ -27,6 +27,7 @@ from multiprocessing import Process, Queue
 import numpy as np
 
 from core import paths
+from core import diagnostics, fixation_scan
 from core.orchestrator import ROLES, Orchestrator
 from core.routing_rules import ALL_RULES, ClearanceModel, HarnessSpec, RoutingRules
 
@@ -64,6 +65,12 @@ class AppController:
         self._detached = False
         #: Dernier état dessiné par agent, pour ne pas redessiner l'identique.
         self._path_signatures: dict[str, tuple] = {}
+        #: Scores successifs du meilleur agent, pour détecter la stagnation.
+        self._best_scores: list = []
+        #: Le modèle de crabe a-t-il pu être chargé ? Renseigné au lancement.
+        self._clamp_model_ok = True
+        #: Résultat du dernier scan de fixations existantes.
+        self.scan_result = None
 
     # ==================================================================
     # Étape 1 : extraction
@@ -348,6 +355,36 @@ class AppController:
                 }
             )
 
+            # Le modèle de crabe est vérifié une fois, ici : s'il est
+            # illisible, aucune règle de fixation ne pourra jamais passer, et
+            # mieux vaut le dire tout de suite que laisser tourner les agents.
+            self._clamp_model_ok = self._check_clamp_model(config.get("crabe_stl_path", ""))
+            self._best_scores.clear()
+
+            # Analyse des fixations déjà montées, avant tout cheminement : les
+            # agents doivent partir de ce qui existe plutôt que d'en reposer
+            # par-dessus. Un scan impossible n'interrompt jamais le lancement.
+            self._post(self.view.set_status, self.t("routing.prepare.scan"), "info")
+            scan_result = fixation_scan.scan(
+                self.extraction_summary.get("fusion_path") or paths.FUSED_MESH_PATH,
+                rule_values.get("clamps_folder", ""),
+            )
+            self.scan_result = scan_result
+            config["existing_crabes"] = [
+                {
+                    "name": f.name,
+                    "position": list(f.position),
+                    "score": f.score,
+                    "routing_points": [
+                        list(point)
+                        for passage in f.passages
+                        for point in (passage.p_in, passage.p_out)
+                    ],
+                }
+                for f in scan_result.fixations
+            ]
+            self._post(self.view.pages[2].show_fixation_scan, scan_result)
+
             self.shared_state = {
                 "is_playing": False,
                 "is_running": True,
@@ -586,6 +623,7 @@ class AppController:
         self.benchmark_algos = {}
         self.shared_state = None
         self._path_signatures.clear()
+        self._best_scores.clear()
         if self.viewer is not None:
             self.viewer.remove_prefix("traj_")
             self.viewer.remove_prefix("clamp_")
@@ -595,7 +633,9 @@ class AppController:
             self.charts.reset()
 
         self.view.pages[2].set_running_state("idle")
-        self.view.pages[2].update_live({"report": None, "team": {}, "agents": []})
+        self.view.pages[2].update_live(
+            {"report": None, "team": {}, "agents": [], "advice": []}
+        )
         self.view.set_status(self.t("app.ready"), "neutral")
 
     # ==================================================================
@@ -608,7 +648,7 @@ class AppController:
 
         page = self.view.pages[2]
         if self.charts is None:
-            self.charts = ProgressCharts(page.charts_container)
+            self.charts = ProgressCharts(page.charts_container, lang=self.view.t.lang)
             self.charts.start()
         else:
             self.charts.reset()
@@ -712,6 +752,7 @@ class AppController:
             snapshot = {
                 name: {
                     "iteration": state.get("iteration", 0),
+                    "reward": state.get("reward", 0.0),
                     "report": state.get("report"),
                     "score": state.get("score"),
                     "waypoints": state.get("waypoints"),
@@ -762,6 +803,12 @@ class AppController:
     def _update_page(self, snapshot: dict, team: dict):
         ranking = team.get("ranking") or list(snapshot)
         best = ranking[0] if ranking else None
+
+        # Conseils : tirés du meilleur agent, et seulement de lui. Moyenner les
+        # rapports de cinq agents produirait un diagnostic qui ne correspond à
+        # aucune route réellement obtenue.
+        best_state = snapshot.get(best, {}) if best else {}
+        advice = self._advise(best_state)
         lang = self.view.t.lang
 
         agents = []
@@ -801,15 +848,91 @@ class AppController:
                 }
             )
 
-        best_state = snapshot.get(best, {}) if best else {}
         self.view.pages[2].update_live(
             {
                 "report": best_state.get("report"),
                 "iteration": best_state.get("iteration"),
                 "team": team,
                 "agents": agents,
+                "advice": advice,
             }
         )
+
+    @staticmethod
+    def _check_clamp_model(path: str) -> bool:
+        """Le fichier STL du crabe est-il réellement chargeable ?
+
+        Un chemin renseigné mais illisible — le cas le plus courant, un chemin
+        hérité d'un autre poste — se traduisait par un « AUCUN crabe possible »
+        répété à chaque itération dans la console, invisible depuis l'interface.
+        """
+        if not path:
+            return False
+        try:
+            import trimesh
+
+            mesh = trimesh.load_mesh(str(path), force="mesh")
+            return len(getattr(mesh, "faces", [])) > 0
+        except Exception:
+            return False
+
+    def _advise(self, best_state: dict) -> list:
+        """Conseils sur l'état du meilleur agent, ou liste vide s'il est trop tôt.
+
+        L'historique des scores sert à repérer la stagnation : conseiller de
+        relâcher une règle alors que le score progresse encore reviendrait à
+        inciter l'utilisateur à baisser ses exigences au premier obstacle.
+        """
+        if self.rules is None:
+            return []
+
+        report = best_state.get("report")
+        score = best_state.get("score")
+        if score is not None:
+            self._best_scores.append(score)
+            # On ne garde que ce qui sert à détecter la stagnation.
+            window = diagnostics.STAGNATION_WINDOW * 3
+            if len(self._best_scores) > window:
+                del self._best_scores[:-window]
+
+        return diagnostics.analyse(
+            report,
+            self.rules,
+            iterations=int(best_state.get("iteration", 0)),
+            stagnant=diagnostics.is_stagnant(self._best_scores),
+            clamp_model_ok=self._clamp_model_ok,
+        )
+
+    def apply_suggestion(self, suggestion):
+        """Reporte la valeur conseillée dans la page « Règles ».
+
+        Le réglage n'est pas appliqué à chaud : les agents ont recopié les
+        règles au démarrage, et n'en changer qu'une partie donnerait un mélange
+        incohérent entre ce qui récompense et ce qui est mesuré. On écrit donc
+        le réglage et on invite explicitement à relancer.
+        """
+        if not getattr(suggestion, "is_applicable", False):
+            return False
+
+        page = self.view.pages[1]
+        fields = {
+            "min_margin": getattr(page, "f_min", None),
+            "max_margin": getattr(page, "f_max", None),
+            "bend_radius_factor": getattr(page, "f_bend_factor", None),
+            "fixation_pitch": getattr(page, "f_pitch", None),
+            "fixation_parallel_tol": getattr(page, "f_parallel", None),
+        }
+        field = fields.get(suggestion.setting)
+        if field is None:
+            self.view.set_status(self.t("advice.not_settable"), "warn")
+            return False
+
+        field.set(suggestion.value)
+        if suggestion.setting in ("bend_radius_factor",):
+            page._refresh_bend()
+        self.view.remember(**{suggestion.setting: suggestion.value})
+        self.view.set_status(self.t("advice.applied"), "ok")
+        return True
 
     def _publish_reports(self):
         """Alimente la page de rapport avec l'état courant des agents."""
