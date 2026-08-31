@@ -153,27 +153,46 @@ table, une distance uniforme s'applique.
 
 ## Le chemin de départ
 
-### Pourquoi plus de géodésique
+### Deux façons de relier les points
 
-Le chemin initial était calculé par `PolyData.geodesic`, qui suit la **surface**
-du maillage. Trois problèmes, dont deux invisibles :
+L'application propose **la recherche dans l'espace libre** (par défaut) et
+**le chemin de surface**. Elles répondent à deux besoins différents.
 
-1. Une maquette DMU est la fusion de centaines de pièces **disjointes**. La
-   géodésique exige un chemin d'arêtes entre les deux sommets ; entre deux
-   pièces séparées il n'y en a aucun. Sur données réelles elle échouait donc
-   systématiquement, et le code la remplaçait **sans le dire** par une ligne
-   droite. Le « chemin géodésique » n'a jamais existé.
-2. Quand elle aboutit, elle colle à la surface : mesuré sur une maquette de
-   test, **60 points de départ sur 60 en violation de la distance minimale**,
-   à 0 mm de la structure. Les agents passaient leurs premières itérations à
-   décoller un câble qui n'aurait jamais dû y être.
-3. Elle contourne les ouvertures au lieu de les traverser : elle ne connaît
-   que la surface.
+### Le chemin de surface, et pourquoi il ne marchait pas
 
-La recherche se fait désormais dans l'**espace libre**, sur une grille de
-voxels où le maillage n'est qu'un champ d'obstacles (`core/path_planner.py`).
-Les pièces disjointes ne posent plus de problème, et le chemin naît dans la
-bande de distance visée.
+`PolyData.geodesic` cherche un chemin d'**arêtes** entre deux sommets. Une
+maquette DMU est la fusion de centaines de pièces **disjointes** : entre deux
+pièces séparées il n'existe aucune arête, donc aucun chemin. La fonction
+échouait systématiquement et le code la remplaçait **sans le dire** par une
+corde tendue. Choisir « le long de la surface » donnait une ligne droite.
+
+`core/surface_path.py` construit le graphe qui manquait :
+
+* les **arêtes du maillage**, pondérées par leur longueur — à l'intérieur d'une
+  pièce, le plus court chemin y *est* la géodésique discrète ;
+* des **ponts** entre pièces voisines, pondérés par leur longueur multipliée
+  par une pénalité (6 par défaut). C'est cette pénalité qui fait la différence
+  entre longer la structure et couper au plus court : sauter coûte six fois le
+  prix du même déplacement le long d'une surface, donc le chemin ne saute que
+  là où il n'a pas le choix.
+
+Les ponts sont cherchés **par composante**, pas par plus proches voisins : sur
+une pièce un tant soit peu dense, les huit voisins les plus proches d'un sommet
+sont tous sur la même pièce, et aucun pont ne serait jamais créé.
+
+Mesuré sur une sphère (maillage connexe) : rapport longueur/corde de 1,57,
+aucun saut, distance moyenne au maillage nulle — c'est bien un arc de grand
+cercle. Sur un chapelet de huit pièces : 79 % du trajet le long des surfaces,
+sept sauts. Avec une pénalité de 1 au lieu de 6, la part sur surface tombe à
+61 % : le réglage agit comme prévu.
+
+Le graphe est restreint à un corridor ellipsoïdal autour de A–B. Sur une
+maquette de 128 000 sommets, cela divise par dix-huit le temps d'un trajet
+court sans changer d'un millimètre le chemin trouvé.
+
+Un chemin de surface **colle à la structure** : c'est sa définition, et les
+agents devront l'en décoller. Si vous voulez partir directement dans la bande
+de distance visée, prenez la recherche dans l'espace libre.
 
 ### A\* pondéré, dont le glouton est un cas particulier
 
@@ -282,18 +301,44 @@ invite à relancer.
 ### Les fixations déjà montées
 
 Si un dossier de modèles de fixations est indiqué à l'étape *Règles*,
-l'application les recale sur la maquette par ICP avant tout cheminement, et en
-déduit pour les peignes les **passages imposés** : le segment `p_in` → `p_out`
-par lequel le câble doit traverser chaque encoche. Le compte et la liste de ces
-passages s'affichent en haut de l'écran *Cheminement*.
+l'application les recale sur la maquette par ICP avant tout cheminement. Le
+bandeau en haut de l'écran *Cheminement* annonce **combien de modèles ont été
+examinés et combien reconnus**, puis liste les passages imposés des peignes :
+le segment `p_in` → `p_out` par lequel le câble doit traverser chaque encoche.
 
-Ce ne sont pas des indications : un faisceau qui ne traverse pas l'encoche
-n'est pas posable, et l'utilisateur doit pouvoir vérifier que l'application a
-reconnu les bonnes.
+Ces fixations sont **dessinées dans la vue 3D** : un repère gris par fixation
+reconnue, une bille verte à l'entrée de chaque encoche, une rouge à la sortie,
+et le segment jaune que le câble doit emprunter. Rien ne les dessinait
+auparavant — le viewer savait masquer les acteurs `clamp_`, mais aucun n'était
+jamais créé, et l'utilisateur n'avait aucun moyen de vérifier ce que le scan
+avait reconnu.
+
+L'interrupteur **« Emprunter les fixations existantes »** décide si le câble
+doit y passer. Quand il est actif, le trajet est **découpé en tronçons** par
+les couples entrée/sortie, ordonnés le long de A→B et orientés dans le sens de
+la marche ; chaque tronçon est planifié séparément puis recollé. La traversée
+de l'encoche elle-même est une ligne droite : y lancer une recherche de chemin
+ferait contourner le peigne au lieu de passer dedans. C'est ce découpage qui
+garantit que le câble passe **par** les fixations et pas seulement à côté.
 
 Le détecteur repose sur Open3D. Sans lui, le scan ne plante pas : il dit
 pourquoi il n'a pas eu lieu, et le cheminement continue sans fixations
 préexistantes.
+
+### Les crabes posés par les agents
+
+Les crabes ne sont pas ajoutés après coup : `compute_crabes` tourne **à chaque
+itération**, à l'intérieur de la boucle d'apprentissage. Leur position pèse sur
+la récompense (`R_crabe`, `R_fixation`) et alimente le rapport de conformité,
+si bien que la trajectoire est déplacée pour aller là où l'on peut réellement
+fixer. Ils sont désormais dessinés au fil du calcul : une bille dorée sur le
+câble, reliée à son pied sur la structure.
+
+Un point à connaître : **sans modèle de crabe chargeable, aucun crabe n'est
+posé**, et la règle du pas entre fixations ne peut jamais passer. C'est
+délibéré — poser une fixation sans vérifier qu'elle tient sur la structure et
+qu'elle n'entre en collision avec rien serait faux. L'onglet *Conseils* le
+signale dès le lancement plutôt que de laisser les agents tourner pour rien.
 
 ---
 
@@ -393,6 +438,7 @@ core/
   fixation_scan.py          fixations existantes et passages imposés
   reward_terms.py           traduction des règles en signal d'apprentissage
   path_planner.py           recherche du chemin de départ dans l'espace libre
+  surface_path.py           chemin le long de la surface, sauts entre pièces compris
   orchestrator.py           rôles, curseur exploration/exploitation, migrations
   agent_team.py             fabrique des réseaux + superviseur d'équipe
   agent_worker.py           boucle d'optimisation d'un agent
@@ -409,7 +455,7 @@ ui/
   charts.py                 courbes (récompense + grandeurs physiques)
   viewer3d.py               vue 3D incrustée (fil de rendu dédié)
   widgets/  pages/          composants et écrans
-tests/                      267 tests hors interface, 116 tests d'interface
+tests/                      298 tests hors interface, 127 tests d'interface
 ```
 
 `core/geometry_metrics.py`, `core/routing_rules.py`, `core/reward_terms.py` et

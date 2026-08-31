@@ -80,11 +80,17 @@ class Passage:
         """Ouverture du passage, en mm."""
         return sum((a - b) ** 2 for a, b in zip(self.p_in, self.p_out)) ** 0.5
 
-    def format(self, lang: str = "FR") -> str:
-        """Ligne lisible : « n° 3 — p_in (12, 40, 8) → p_out (12, 96, 8) »."""
+    def format(self, lang: str = "FR", number: int | None = None) -> str:
+        """Ligne lisible : « n° 3 — p_in (12, 40, 8) → p_out (12, 96, 8) ».
+
+        ``index`` repère l'encoche **au sein de son peigne** : deux peignes à
+        une encoche portent donc tous deux l'index 0. Pour une liste qui les
+        mélange, passez ``number`` afin de les numéroter de façon continue.
+        """
         label = "no." if _english(lang) else "n°"
+        shown = self.index + 1 if number is None else number
         return (
-            f"{label} {self.index + 1} — p_in ({_coords(self.p_in)}) "
+            f"{label} {shown} — p_in ({_coords(self.p_in)}) "
             f"→ p_out ({_coords(self.p_out)})"
         )
 
@@ -146,20 +152,24 @@ class ScanResult:
             table = _REASON_EN if _english(lang) else _REASON_FR
             return table.get(self.skipped_reason, self.skipped_reason)
 
+        scanned = self.scanned_files
+
         if not self.fixations:
-            return (
-                "No existing fixation recognised in the mock-up."
-                if _english(lang) else
-                "Aucune fixation existante reconnue dans la maquette."
-            )
+            if _english(lang):
+                return (f"{scanned} model(s) scanned, none recognised in the mock-up."
+                        if scanned else "No existing fixation recognised in the mock-up.")
+            return (f"{scanned} modèle(s) examiné(s), aucun reconnu dans la maquette."
+                    if scanned else "Aucune fixation existante reconnue dans la maquette.")
 
         if _english(lang):
-            text = f"{self.n_fixations} existing fixation(s) recognised"
+            text = f"{self.n_fixations} of {scanned} model(s) recognised" if scanned \
+                else f"{self.n_fixations} existing fixation(s) recognised"
             if self.n_passages:
                 text += f", {self.n_passages} imposed passage(s)"
             return text + "."
 
-        text = f"{self.n_fixations} fixation(s) existante(s) reconnue(s)"
+        text = f"{self.n_fixations} fixation(s) reconnue(s) sur {scanned} modèle(s) examiné(s)" \
+            if scanned else f"{self.n_fixations} fixation(s) existante(s) reconnue(s)"
         if self.n_passages:
             text += f", {self.n_passages} passage(s) imposé(s)"
         return text + "."

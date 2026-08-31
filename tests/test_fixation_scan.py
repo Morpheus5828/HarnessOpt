@@ -203,3 +203,30 @@ def test_un_scan_qui_echoue_ne_leve_pas(tmp_path, monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boum")))
     result = fs.scan(str(scene), str(tmp_path))
     assert result.skipped_reason == fs.FAILED
+
+
+# ----------------------------------------------------------------------
+# Numérotation
+# ----------------------------------------------------------------------
+
+def test_l_index_est_propre_a_chaque_peigne():
+    """Deux peignes à une encoche portent tous deux l'index 0."""
+    result = fs.summarise([raw_comb(name="a.stl", n_passages=1),
+                           raw_comb(name="b.stl", n_passages=1)])
+    assert [p.index for p in result.passages] == [0, 0]
+
+
+def test_une_numerotation_continue_peut_etre_imposee():
+    """Sans quoi une liste mélangeant les peignes afficherait trois « n° 1 »."""
+    result = fs.summarise([raw_comb(name="a.stl", n_passages=1),
+                           raw_comb(name="b.stl", n_passages=1),
+                           raw_comb(name="c.stl", n_passages=1)])
+    lignes = [p.format("FR", number=n) for n, p in enumerate(result.passages, 1)]
+    assert "n° 1" in lignes[0]
+    assert "n° 2" in lignes[1]
+    assert "n° 3" in lignes[2]
+
+
+def test_la_numerotation_continue_marche_aussi_en_anglais():
+    passage = fs.summarise([raw_comb(n_passages=1)]).passages[0]
+    assert "no. 7" in passage.format("EN", number=7)

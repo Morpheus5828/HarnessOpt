@@ -304,14 +304,38 @@ class TestIntegrationControleur:
         assert clearances(dmu_disjoint, points).min() >= 20.0
         assert view.messages[-1][0] == "ok"
 
-    def test_la_geodesique_avertit_au_lieu_de_se_taire(self, dmu_disjoint):
+    def test_la_geodesique_suit_la_surface_malgre_les_pieces_disjointes(self, dmu_disjoint):
+        """Le cas qui échouait : ``pv.geodesic`` rendait une corde tendue.
+
+        Elle exige un chemin d'arêtes, dont une maquette faite de pièces
+        séparées ne dispose jamais. Le chemin de surface franchit les
+        intervalles par des sauts courts et longe la structure le reste du
+        temps : il doit donc rester proche du DMU, là où une corde s'en écarte.
+        """
         controller, view = self._controleur()
         points = controller._build_initial_path(
             dmu_disjoint, self._regles(), {"start_path": "geodesic", "initial_points": 48}
         )
         assert points is not None
-        assert view.messages[-1][0] == "warn"
-        assert clearances(dmu_disjoint, points).min() < 20.0  # collée à la structure
+        assert view.messages[-1][0] == "ok"
+
+        # Un chemin de surface colle au DMU ; c'est attendu, et c'est bien ce
+        # que demande « le long de la surface ».
+        assert clearances(dmu_disjoint, points).min() < 20.0
+
+        # …et surtout il n'est pas une ligne droite : la corde s'éloignerait.
+        droite = np.linspace(points[0], points[-1], len(points))
+        assert np.abs(points - droite).max() > 1.0
+
+    def test_la_geodesique_reste_plus_proche_du_dmu_qu_une_corde(self, dmu_disjoint):
+        """Critère décisif : suivre la surface, ce n'est pas la traverser."""
+        controller, view = self._controleur()
+        points = controller._build_initial_path(
+            dmu_disjoint, self._regles(), {"start_path": "geodesic", "initial_points": 48}
+        )
+        corde = np.linspace(points[0], points[-1], len(points))
+        assert (np.abs(clearances(dmu_disjoint, points)).mean()
+                < np.abs(clearances(dmu_disjoint, corde)).mean())
 
     def test_un_echec_interrompt_le_lancement(self, dmu_disjoint):
         """Le contrôleur ne doit pas démarrer les agents sur un chemin absent."""
@@ -330,3 +354,120 @@ class TestIntegrationControleur:
         import controller.app_controller as module
 
         assert "filedialog" not in dir(module)
+
+
+class TestPassageParLesFixations:
+    """Le chemin de départ doit réellement traverser les encoches détectées.
+
+    « Passer près d'une fixation » ne suffit pas : un peigne impose au câble
+    d'entrer par une face et de ressortir par l'autre. Le trajet est donc
+    découpé en tronçons par ces couples entrée/sortie, et la traversée de
+    l'encoche elle-même est une ligne droite — y lancer une recherche de chemin
+    ferait contourner le peigne au lieu de passer dedans.
+    """
+
+    @staticmethod
+    def _controleur_avec_passages(passages):
+        from core.fixation_scan import summarise
+
+        controller, view = TestIntegrationControleur._controleur()
+        controller.scan_result = summarise(
+            [{"name": "peigne.stl", "position": [900.0, 400.0, 250.0], "score": 0.9,
+              "routing_points": passages}]
+        )
+        return controller, view
+
+    @staticmethod
+    def _valeurs(**overrides):
+        values = {"start_path": "balanced", "initial_points": 60, "use_fixations": True}
+        values.update(overrides)
+        return values
+
+    def test_sans_fixations_le_trajet_a_deux_etapes(self):
+        controller, _ = TestIntegrationControleur._controleur()
+        nodes, forced = controller._route_nodes(self._valeurs())
+        assert len(nodes) == 2
+        assert forced == set()
+
+    def test_une_encoche_ajoute_son_entree_et_sa_sortie(self):
+        controller, _ = self._controleur_avec_passages(
+            [[900.0, 350.0, 250.0], [900.0, 450.0, 250.0]]
+        )
+        nodes, forced = controller._route_nodes(self._valeurs())
+        assert len(nodes) == 4          # A, p_in, p_out, B
+        assert forced == {1}            # le tronçon p_in -> p_out reste droit
+
+    def test_les_encoches_sont_ordonnees_le_long_du_trajet(self):
+        """Deux peignes pris à l'envers feraient revenir le câble en arrière."""
+        controller, _ = self._controleur_avec_passages([
+            [1400.0, 350.0, 250.0], [1400.0, 450.0, 250.0],   # loin
+            [600.0, 350.0, 250.0], [600.0, 450.0, 250.0],     # proche
+        ])
+        nodes, _ = controller._route_nodes(self._valeurs())
+        abscisses = [float(n[0]) for n in nodes]
+        assert abscisses == sorted(abscisses)
+
+    def test_l_entree_est_le_cote_rencontre_en_premier(self):
+        """Entrer par la sortie obligerait le câble à faire demi-tour dedans."""
+        # Encoche décrite à rebours du sens de marche (A vers +x).
+        controller, _ = self._controleur_avec_passages(
+            [[950.0, 400.0, 250.0], [850.0, 400.0, 250.0]]
+        )
+        nodes, _ = controller._route_nodes(self._valeurs())
+        assert float(nodes[1][0]) < float(nodes[2][0])
+
+    def test_decocher_l_option_ignore_les_fixations(self):
+        controller, _ = self._controleur_avec_passages(
+            [[900.0, 350.0, 250.0], [900.0, 450.0, 250.0]]
+        )
+        nodes, forced = controller._route_nodes(self._valeurs(use_fixations=False))
+        assert len(nodes) == 2
+        assert forced == set()
+
+    def test_un_scan_non_effectue_n_impose_rien(self):
+        from core.fixation_scan import NO_OPEN3D, ScanResult
+
+        controller, _ = TestIntegrationControleur._controleur()
+        controller.scan_result = ScanResult(skipped_reason=NO_OPEN3D)
+        nodes, _ = controller._route_nodes(self._valeurs())
+        assert len(nodes) == 2
+
+    def test_le_chemin_passe_reellement_par_l_encoche(self, dmu_disjoint):
+        """Le critère qui compte : les deux points de l'encoche sont sur le tracé."""
+        p_in = [900.0, 380.0, 250.0]
+        p_out = [900.0, 420.0, 250.0]
+        controller, view = self._controleur_avec_passages([p_in, p_out])
+
+        points = controller._build_initial_path(
+            dmu_disjoint, TestIntegrationControleur._regles(), self._valeurs()
+        )
+        assert points is not None
+        for cible in (p_in, p_out):
+            ecart = np.linalg.norm(points - np.array(cible), axis=1).min()
+            assert ecart < 1.0, f"le tracé ne passe pas par {cible} (écart {ecart:.1f} mm)"
+
+    def test_la_traversee_de_l_encoche_est_droite(self, dmu_disjoint):
+        p_in = np.array([900.0, 380.0, 250.0])
+        p_out = np.array([900.0, 420.0, 250.0])
+        controller, _ = self._controleur_avec_passages([p_in.tolist(), p_out.tolist()])
+
+        points = controller._build_initial_path(
+            dmu_disjoint, TestIntegrationControleur._regles(), self._valeurs()
+        )
+        i_in = int(np.linalg.norm(points - p_in, axis=1).argmin())
+        i_out = int(np.linalg.norm(points - p_out, axis=1).argmin())
+        traversee = points[min(i_in, i_out):max(i_in, i_out) + 1]
+
+        droite = np.linspace(traversee[0], traversee[-1], len(traversee))
+        assert np.abs(traversee - droite).max() < 1e-3
+
+    def test_le_chemin_reste_utilisable_avec_la_geodesique(self, dmu_disjoint):
+        controller, _ = self._controleur_avec_passages(
+            [[900.0, 380.0, 250.0], [900.0, 420.0, 250.0]]
+        )
+        points = controller._build_initial_path(
+            dmu_disjoint, TestIntegrationControleur._regles(),
+            self._valeurs(start_path="geodesic"),
+        )
+        assert points is not None
+        assert len(points) >= 10

@@ -726,3 +726,165 @@ class TestScanDeFixations:
 
     def test_le_dossier_de_fixations_est_collecte(self, app):
         assert "clamps_folder" in app.pages[1].collect()
+
+
+class TestPassageParLesFixations:
+    """Interrupteur « emprunter les fixations existantes »."""
+
+    def test_l_option_existe_et_est_active_par_defaut(self, app):
+        assert app.pages[2].f_use_fixations.get() is True
+
+    def test_l_option_est_collectee(self, app):
+        assert "use_fixations" in app.pages[2].collect()
+
+    def test_decocher_se_repercute_sur_la_collecte(self, app):
+        page = app.pages[2]
+        page.f_use_fixations.var.set(False)
+        try:
+            assert page.collect()["use_fixations"] is False
+        finally:
+            page.f_use_fixations.var.set(True)
+
+    def test_le_controleur_lit_l_option(self, app):
+        from core.fixation_scan import summarise
+
+        page = app.pages[2]
+        app.controller.scan_result = summarise([{
+            "name": "p.stl", "position": [0, 0, 0], "score": 0.9,
+            "routing_points": [[10, 0, 0], [10, 50, 0]],
+        }])
+        try:
+            page.f_use_fixations.var.set(False)
+            assert app.controller._passages_to_use(page.collect()) == []
+            page.f_use_fixations.var.set(True)
+            assert len(app.controller._passages_to_use(page.collect())) == 1
+        finally:
+            page.f_use_fixations.var.set(True)
+            app.controller.scan_result = None
+
+
+class TestAffichage3DDesFixations:
+    """Les fixations et les crabes doivent être visibles, pas seulement comptés."""
+
+    class _ViewerFactice:
+        """Enregistre les acteurs, sans contexte 3D."""
+
+        def __init__(self):
+            self.actors = {}
+            self.is_available = True
+            self.renders = 0
+
+        def show_sphere(self, center, name, **kwargs):
+            self.actors[name] = ("sphere", kwargs.get("color"))
+
+        def show_path(self, points, name, **kwargs):
+            self.actors[name] = ("path", kwargs.get("color"))
+
+        def remove_prefix(self, prefix):
+            for name in [n for n in self.actors if n.startswith(prefix)]:
+                del self.actors[name]
+
+        def render(self):
+            self.renders += 1
+
+    @staticmethod
+    def _scan(n_passages=2):
+        from core.fixation_scan import summarise
+
+        points = []
+        for i in range(n_passages):
+            points.append([float(i * 20), 0.0, 0.0])
+            points.append([float(i * 20), 50.0, 0.0])
+        return summarise([{"name": "peigne.stl", "position": [5.0, 5.0, 5.0],
+                           "score": 0.9, "routing_points": points}])
+
+    def test_les_fixations_scannees_sont_dessinees(self, app):
+        viewer = self._ViewerFactice()
+        app.controller.viewer = viewer
+        try:
+            app.controller._draw_fixations(self._scan(2))
+            noms = set(viewer.actors)
+            assert "fixation_body_0" in noms
+            assert "fixation_in_0" in noms and "fixation_out_0" in noms
+            assert "fixation_slot_0" in noms
+            assert "fixation_in_1" in noms
+        finally:
+            app.controller.viewer = None
+
+    def test_l_entree_et_la_sortie_ont_des_couleurs_distinctes(self, app):
+        viewer = self._ViewerFactice()
+        app.controller.viewer = viewer
+        try:
+            app.controller._draw_fixations(self._scan(1))
+            assert viewer.actors["fixation_in_0"][1] != viewer.actors["fixation_out_0"][1]
+        finally:
+            app.controller.viewer = None
+
+    def test_un_scan_non_effectue_efface_les_fixations(self, app):
+        from core.fixation_scan import NO_OPEN3D, ScanResult
+
+        viewer = self._ViewerFactice()
+        app.controller.viewer = viewer
+        try:
+            app.controller._draw_fixations(self._scan(1))
+            assert viewer.actors
+            app.controller._draw_fixations(ScanResult(skipped_reason=NO_OPEN3D))
+            assert not any(n.startswith("fixation_") for n in viewer.actors)
+        finally:
+            app.controller.viewer = None
+
+    def test_les_crabes_poses_sont_dessines(self, app):
+        viewer = self._ViewerFactice()
+        app.controller.viewer = viewer
+        app.controller._clamp_signature = ()
+        try:
+            app.controller._draw_clamps([
+                {"arc_mm": 100.0, "tilt_deg": 2.0,
+                 "position": np.array([0.0, 0.0, 0.0]),
+                 "surface_position": np.array([0.0, 0.0, -20.0])},
+            ])
+            assert "clamp_0" in viewer.actors
+            assert "clamp_leg_0" in viewer.actors
+        finally:
+            app.controller.viewer = None
+            app.controller._clamp_signature = ()
+
+    def test_un_crabe_sans_position_ne_casse_pas(self, app):
+        viewer = self._ViewerFactice()
+        app.controller.viewer = viewer
+        app.controller._clamp_signature = ()
+        try:
+            app.controller._draw_clamps([{"arc_mm": 1.0, "tilt_deg": 0.0}])
+            assert not any(n.startswith("clamp_") for n in viewer.actors)
+        finally:
+            app.controller.viewer = None
+            app.controller._clamp_signature = ()
+
+    def test_les_crabes_identiques_ne_sont_pas_redessines(self, app):
+        """Redessiner quatre fois par seconde ferait clignoter la vue."""
+        viewer = self._ViewerFactice()
+        app.controller.viewer = viewer
+        app.controller._clamp_signature = ()
+        crabes = [{"arc_mm": 100.0, "tilt_deg": 2.0,
+                   "position": np.array([0.0, 0.0, 0.0])}]
+        try:
+            app.controller._draw_clamps(crabes)
+            avant = viewer.renders
+            app.controller._draw_clamps(crabes)
+            assert viewer.renders == avant
+        finally:
+            app.controller.viewer = None
+            app.controller._clamp_signature = ()
+
+    def test_le_bandeau_annonce_les_modeles_examines(self, app):
+        from core.fixation_scan import summarise
+
+        page = app.pages[2]
+        result = summarise([{"name": "p.stl", "position": [0, 0, 0], "score": 0.9}],
+                           scanned_files=17)
+        page.show_fixation_scan(result)
+        app.update()
+        try:
+            assert "17" in page.lbl_scan.cget("text")
+        finally:
+            page.show_fixation_scan(None)

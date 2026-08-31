@@ -167,6 +167,8 @@ FR: dict[str, str] = {
         "Suit le maillage. Inopérant sur une maquette faite de pièces disjointes, "
         "où il se réduit à une ligne droite collée à la structure."
     ),
+    "routing.use_fixations": "Emprunter les fixations existantes",
+    "routing.use_fixations.help": "Le chemin de départ traverse chaque encoche reconnue, par son entrée puis sa sortie. Décochez pour laisser les agents choisir librement leur passage.",
     "routing.explore": "Exploration ↔ Exploitation",
     "routing.explore.help": (
         "À gauche, les agents peaufinent la meilleure route trouvée. "
@@ -393,6 +395,8 @@ EN: dict[str, str] = {
         "Follows the mesh. Ineffective on a mock-up made of disjoint parts, where "
         "it degrades to a straight line stuck to the structure."
     ),
+    "routing.use_fixations": "Route through existing fixations",
+    "routing.use_fixations.help": "The starting path goes through each recognised notch, in then out. Untick to let the agents choose their own way.",
     "routing.explore": "Exploration ↔ Exploitation",
     "routing.explore.help": (
         "On the left, agents refine the best route found. On the right, they search wide, "
