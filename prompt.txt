@@ -1,0 +1,9 @@
+J'aimerais te faire remonter quelques soucis utilisateur que j'ai pu rencontrer lors de la prise en main.
+- Lorsque je lance le processus de cheminement, l'application freeze.
+- L'interface 3D pour visualiser le maillage ainsi que le harnais à l'intérieur ne marche pas.
+- Coté design graphique, j'aimerais que tu l'améliores un petit peu:
+ (suppression du text Cheminement assiste de harnais électrique en helico)
+ Améliore l'IHM.
+- Au niveau de la page "Règles" améliore l'aspect visuel pour avoir un system de chechbox pour chaque règles pour renseigner à l'application si ces règles doivent être prise en compte ou pas.
+
+ 
