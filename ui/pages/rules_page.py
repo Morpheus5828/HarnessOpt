@@ -165,7 +165,20 @@ class RulesPage(ctk.CTkScrollableFrame):
             mode="file",
             filetypes=[("Fichiers STL", "*.stl"), ("Tous les fichiers", "*.*")],
         )
-        self.f_clamp_model.pack(fill="x")
+        self.f_clamp_model.pack(fill="x", pady=(0, SPACE.MD))
+
+        # Sans ce dossier, l'application ignore purement et simplement les
+        # fixations déjà présentes dans la maquette : les agents reposent des
+        # crabes là où il en existe déjà.
+        self.f_clamps_folder = PathField(
+            self.card_fix.body,
+            label=t("rules.clamps_folder"),
+            help_text=t("rules.clamps_folder.help"),
+            value=saved.get("clamps_folder", ""),
+            browse_text=t("project.browse"),
+            mode="directory",
+        )
+        self.f_clamps_folder.pack(fill="x")
 
         # --- actions ------------------------------------------------------
         actions = ctk.CTkFrame(self, fg_color="transparent")
@@ -274,6 +287,7 @@ class RulesPage(ctk.CTkScrollableFrame):
             "fixation_pitch": self.f_pitch.get(250.0),
             "fixation_parallel_tol": self.f_parallel.get(15.0),
             "crabe_stl_path": self.f_clamp_model.get(),
+            "clamps_folder": self.f_clamps_folder.get(),
             "enabled_rules": sorted(self.rule_list.get()),
             "family_clearance": {
                 name: field.get(10.0) for name, field in self._family_fields.items()
@@ -336,6 +350,8 @@ class RulesPage(ctk.CTkScrollableFrame):
         self.f_parallel.set_label(t("rules.parallel"), t("rules.parallel.help"))
         self.f_clamp_model.set_label(t("rules.clamp_model"), t("rules.clamp_model.help"))
         self.f_clamp_model.set_browse_text(t("project.browse"))
+        self.f_clamps_folder.set_label(t("rules.clamps_folder"), t("rules.clamps_folder.help"))
+        self.f_clamps_folder.set_browse_text(t("project.browse"))
         self.btn_reset.configure(text=t("rules.reset"))
         self.btn_continue.configure(text=t("rules.continue"))
         self._refresh_bend()
