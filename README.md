@@ -41,7 +41,7 @@ Un assistant en quatre étapes, qui se déverrouillent au fur et à mesure.
 |---|---|
 | **1. Projet** | Désigner le dossier de STL (ou lancer l'export CATIA), assembler la maquette, voir la répartition des pièces par famille. |
 | **2. Règles** | Cocher les règles à appliquer, puis régler diamètre du toron, rayon de cintrage, distances mini/maxi, distances renforcées par famille, pas entre fixations. |
-| **3. Cheminement** | Poser départ et arrivée, choisir une équipe d'agents et le réglage exploration/exploitation, lancer, suivre en direct. |
+| **3. Cheminement** | Poser départ et arrivée, choisir une équipe d'agents et le réglage exploration/exploitation, lancer, suivre en direct (conformité, conseils, agents, courbes). |
 | **4. Rapport** | Lire le verdict règle par règle, exporter en STL, CSV ou JSON, réinsérer le faisceau dans le document CATIA ouvert. |
 
 Tout est exprimé en unités physiques et en vocabulaire métier. Les
@@ -98,6 +98,25 @@ clic que la route obtenue pourra ne pas être livrable.
 Le catalogue des règles vit dans `RULE_CATALOG` (`core/routing_rules.py`) :
 ajouter une règle à ce tuple suffit à la faire apparaître à l'écran avec sa case
 à cocher, son libellé bilingue et sa gravité.
+
+### Les zigzags
+
+Un zigzag n'est pas une question de courbure totale, et c'est pourquoi il a son
+terme propre dans la récompense de **tous** les agents. Un arc de cercle
+régulier accumule beaucoup de courbure sans jamais osciller ; à l'inverse, une
+succession de petits virages alternés totalise peu de courbure tout en donnant
+un câble visuellement inacceptable. Ni le rayon de cintrage, qui regarde le
+virage local, ni la part de tracé rectiligne ne distinguent ces deux cas.
+
+La mesure compte les **inversions du sens de virage** — produit scalaire négatif
+entre binormales consécutives — et retient l'amplitude du plus petit des deux
+virages en cause : une oscillation minuscule entre deux grands virages reste une
+petite faute, deux grands virages opposés forment un vrai zigzag.
+
+Aucun rôle ne descend sous le poids de référence, pas même l'éclaireur qui
+néglige par ailleurs le lissage, et le terme ne dépend d'aucune case à cocher.
+Mesuré sur 165 itérations, il fait passer l'éclaireur de 417° à 202°
+d'oscillation cumulée, et le contrôleur d'écarts de 317° à 246°.
 
 ### Le rayon de cintrage
 
@@ -216,6 +235,68 @@ restait vide sur toutes les plateformes.
 
 ---
 
+## Suivre et débloquer une session
+
+### Les courbes
+
+Quatre courbes, une par agent, avec la couleur de sa trajectoire dans la vue 3D :
+la **récompense** — ce que l'agent maximise réellement, seule à dire si
+l'apprentissage progresse ou piétine — puis trois grandeurs physiques
+(interférences, distance au DMU, rayon de cintrage) avec leur limite en
+pointillés, qui disent si la route est livrable.
+
+Les deux registres sont nécessaires. Une récompense qui monte pendant qu'un
+rayon de cintrage stagne sous la limite signale une pondération mal réglée : ni
+l'une ni l'autre des courbes ne le montre seule.
+
+L'abscisse porte le **numéro d'itération**. Passé quatre cents relevés,
+l'historique est décimé d'un facteur deux plutôt que tronqué : la courbe couvre
+toujours toute la session, début compris, au lieu d'afficher éternellement
+« 0 à 400 » alors que les agents en sont à plusieurs milliers d'itérations.
+
+### Les conseils
+
+Un agent qui n'arrive pas à respecter une règle ne le dit pas : il continue,
+et rien ne distingue « c'est long » de « c'est impossible ». L'onglet
+**Conseils** fait la différence, et la formule en termes actionnables — valeur
+mesurée, valeur proposée, réglage exact, bouton pour l'appliquer.
+
+Trois garde-fous le gouvernent :
+
+* **Rien avant d'avoir cherché.** Les conseils n'apparaissent qu'après un
+  nombre minimal d'itérations *et* une stagnation avérée du meilleur score.
+  Sinon l'application inciterait à baisser les exigences au premier obstacle.
+* **Jamais de relâchement sur les clashs.** Une route qui traverse la structure
+  n'est pas une route ; le conseil porte alors sur la recherche — plus
+  d'exploration, plus de points, points de départ mal placés — et ne propose
+  aucun réglage. C'est la seule règle traitée ainsi.
+* **Jamais de valeur intenable.** En deçà de 3 × Ø de rayon de cintrage ou d'un
+  millimètre de distance, aucun bouton n'est proposé : la route serait déclarée
+  conforme sans être posable. Le conseil dit alors de revoir le passage.
+
+Le réglage n'est pas appliqué à chaud. Les agents ont recopié les règles au
+démarrage ; n'en changer qu'une partie donnerait un mélange incohérent entre ce
+qui récompense et ce qui est mesuré. Le bouton écrit dans l'étape *Règles* et
+invite à relancer.
+
+### Les fixations déjà montées
+
+Si un dossier de modèles de fixations est indiqué à l'étape *Règles*,
+l'application les recale sur la maquette par ICP avant tout cheminement, et en
+déduit pour les peignes les **passages imposés** : le segment `p_in` → `p_out`
+par lequel le câble doit traverser chaque encoche. Le compte et la liste de ces
+passages s'affichent en haut de l'écran *Cheminement*.
+
+Ce ne sont pas des indications : un faisceau qui ne traverse pas l'encoche
+n'est pas posable, et l'utilisateur doit pouvoir vérifier que l'application a
+reconnu les bonnes.
+
+Le détecteur repose sur Open3D. Sans lui, le scan ne plante pas : il dit
+pourquoi il n'a pas eu lieu, et le cheminement continue sans fixations
+préexistantes.
+
+---
+
 ## Les agents
 
 ### Rôles
@@ -308,6 +389,8 @@ core/
   paths.py                  dossiers de travail, réglages persistants
   geometry_metrics.py       longueurs, courbure, rectitude, portées libres
   routing_rules.py          règles d'intégration + rapport de conformité
+  diagnostics.py            conseils quand la convergence bloque
+  fixation_scan.py          fixations existantes et passages imposés
   reward_terms.py           traduction des règles en signal d'apprentissage
   path_planner.py           recherche du chemin de départ dans l'espace libre
   orchestrator.py           rôles, curseur exploration/exploitation, migrations
@@ -323,10 +406,10 @@ controller/
 ui/
   app_window.py             fenêtre principale (assistant 4 étapes)
   theme.py  i18n.py         charte graphique, traductions FR/EN/DE/ES
-  charts.py                 courbes de progression
+  charts.py                 courbes (récompense + grandeurs physiques)
   viewer3d.py               vue 3D incrustée (fil de rendu dédié)
   widgets/  pages/          composants et écrans
-tests/                      196 tests hors interface, 80 tests d'interface
+tests/                      267 tests hors interface, 116 tests d'interface
 ```
 
 `core/geometry_metrics.py`, `core/routing_rules.py`, `core/reward_terms.py` et
@@ -354,8 +437,8 @@ aucun chemin actif.
 
 ```bash
 python -m pytest tests/ -q                       # règles, géométrie, agents
-xvfb-run -a python -m pytest tests/test_ui.py \
-                            tests/test_viewer3d.py  # interface et vue 3D
+xvfb-run -a python -m pytest tests/test_ui.py tests/test_viewer3d.py \\
+                            tests/test_charts.py    # interface, vue 3D, courbes
 ```
 
 Les tests d'interface s'ignorent d'eux-mêmes si tkinter, customtkinter ou un
