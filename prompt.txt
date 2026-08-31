@@ -1,9 +1,8 @@
 J'aimerais te faire remonter quelques soucis utilisateur que j'ai pu rencontrer lors de la prise en main.
-- Lorsque je lance le processus de cheminement, l'application freeze.
-- L'interface 3D pour visualiser le maillage ainsi que le harnais à l'intérieur ne marche pas.
-- Coté design graphique, j'aimerais que tu l'améliores un petit peu:
- (suppression du text Cheminement assiste de harnais électrique en helico)
- Améliore l'IHM.
-- Au niveau de la page "Règles" améliore l'aspect visuel pour avoir un system de chechbox pour chaque règles pour renseigner à l'application si ces règles doivent être prise en compte ou pas.
+- Dans la zone de progression je voudrais voir la courbe des rewards.
+- Sur les axes abscisses ça va de 0 à 400 au lieu de 0 à (itération en court)
+- Je voudrais ajouter une fonctionalité qui par exemple donne des indications à l'uilisateur si jamais la convergence est difficile. Par exemple si il a la règle des distances mini qui n'est pas respecté, l'application propose à l'utilisateur d' d'augmenter cette valeur.
+- Si l'application scan des fixations avec succès avant le cheminement, je veux voir sur la page cheminement un endroit où cette valeur est renseigné avec les fameux p_int et p_out. 
+- Je voudrais que pour chaque agent éviter les zigzag aussi c'est important.
 
  
