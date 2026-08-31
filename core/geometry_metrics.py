@@ -29,6 +29,9 @@ __all__ = [
     "min_bend_radius",
     "min_curvature_radius",
     "straightness",
+    "turn_binormals",
+    "zigzag_severity",
+    "zigzag_metrics",
     "free_spans",
     "longest_free_span",
     "support_gaps",
@@ -256,6 +259,89 @@ def straightness(points: np.ndarray, angle_tol_deg: float = 3.0) -> dict:
         "longest_run_mm": longest,
         "n_bends": bends,
         "total_turning_deg": float(np.degrees(angles.sum())),
+    }
+
+
+def turn_binormals(points: np.ndarray) -> np.ndarray:
+    """Binormale unitaire à chaque point intérieur. Tableau ``(n - 2, 3)``.
+
+    Elle donne le **sens** du virage, là où :func:`turning_angles` n'en donne
+    que l'amplitude. Deux virages de même amplitude dont les binormales sont
+    opposées tournent en sens contraire : c'est la définition géométrique d'un
+    zigzag. Les points dégénérés (segments confondus, virage parfaitement
+    droit) reçoivent une binormale nulle.
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    if len(pts) < 3:
+        return np.zeros((0, 3))
+
+    binormals = np.cross(pts[1:-1] - pts[:-2], pts[2:] - pts[1:-1])
+    norms = np.linalg.norm(binormals, axis=1)
+    unit = np.zeros_like(binormals)
+    safe = norms > _EPS_LEN
+    unit[safe] = binormals[safe] / norms[safe, None]
+    return unit
+
+
+def zigzag_severity(points: np.ndarray, angle_tol_deg: float = 3.0) -> np.ndarray:
+    """Gravité de l'inversion de sens à chaque point intérieur, en radians.
+
+    Une valeur nulle signifie « pas d'inversion ici ». Une valeur positive est
+    l'amplitude du **plus petit** des deux virages consécutifs qui s'opposent.
+
+    Prendre le plus petit des deux est délibéré : une oscillation minuscule
+    entre deux grands virages reste une petite faute de tracé, alors que deux
+    grands virages opposés forment un vrai zigzag. Retenir le plus grand, ou
+    leur somme, ferait payer au câble le prix d'un zigzag franc pour un simple
+    frémissement numérique.
+
+    Tableau de taille ``n - 2``, aligné sur :func:`turning_angles`.
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    angles = turning_angles(pts)
+    severity = np.zeros(len(angles))
+    if len(angles) < 2:
+        return severity
+
+    unit = turn_binormals(pts)
+    tol = np.radians(float(angle_tol_deg))
+    significant = angles > tol
+
+    # Produit scalaire entre binormales consécutives : négatif = sens inversé.
+    dots = np.einsum("ij,ij->i", unit[:-1], unit[1:])
+    reversed_turn = (dots < 0.0) & significant[:-1] & significant[1:]
+
+    # La faute est imputée aux deux virages concernés : l'agent doit pouvoir
+    # corriger en agissant sur l'un ou l'autre.
+    paired = np.minimum(angles[:-1], angles[1:])
+    severity[:-1] = np.where(reversed_turn, paired, severity[:-1])
+    severity[1:] = np.maximum(severity[1:], np.where(reversed_turn, paired, 0.0))
+    return severity
+
+
+def zigzag_metrics(points: np.ndarray, angle_tol_deg: float = 3.0) -> dict:
+    """Indicateurs d'oscillation d'un tracé.
+
+    * ``n_zigzags`` : nombre d'inversions de sens de virage ;
+    * ``zigzag_deg`` : somme des amplitudes concernées, en degrés ;
+    * ``worst_zigzag_deg`` : la pire inversion, en degrés.
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    angles = turning_angles(pts)
+    if len(angles) < 2:
+        return {"n_zigzags": 0, "zigzag_deg": 0.0, "worst_zigzag_deg": 0.0}
+
+    unit = turn_binormals(pts)
+    tol = np.radians(float(angle_tol_deg))
+    significant = angles > tol
+    dots = np.einsum("ij,ij->i", unit[:-1], unit[1:])
+    reversed_turn = (dots < 0.0) & significant[:-1] & significant[1:]
+
+    paired = np.minimum(angles[:-1], angles[1:])[reversed_turn]
+    return {
+        "n_zigzags": int(reversed_turn.sum()),
+        "zigzag_deg": float(np.degrees(paired.sum())) if len(paired) else 0.0,
+        "worst_zigzag_deg": float(np.degrees(paired.max())) if len(paired) else 0.0,
     }
 
 

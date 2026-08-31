@@ -318,6 +318,7 @@ def algo_worker(
             straight_weight = float(cfg.get("straight_weight", 25.0))
             straight_run_bonus = float(cfg.get("straight_run_bonus", 15.0))
             straight_run_scale = float(cfg.get("straight_run_scale_mm", 500.0))
+            zigzag_weight = float(cfg.get("zigzag_weight", 60.0))
             fixation_pitch = float(cfg.get("fixation_pitch_mm", cfg.get("crabe_min_spacing", 250.0)))
             free_span_weight = float(cfg.get("free_span_weight", 80.0))
             detour_weight = float(cfg.get("detour_weight", 40.0))
@@ -636,6 +637,16 @@ def algo_worker(
 
                 R_smooth_total = R_bend + R_laplace
 
+                # Zigzags : inversions du sens de virage. Ni le rayon de
+                # cintrage ni le laplacien ne les voient — un arc régulier
+                # accumule de la courbure sans osciller, et une alternance de
+                # petits virages oscille sans jamais serrer le rayon.
+                R_zigzag = rwt.zigzag_penalty(
+                    candidate_for_shape,
+                    angle_tol_deg=straight_tol_deg,
+                    weight=zigzag_weight,
+                )[danger_indices]
+
                 # « Rester droit le plus longtemps possible » : la prime croît
                 # avec la longueur de la ligne droite à laquelle le point
                 # appartient, pas seulement avec sa platitude locale.
@@ -783,6 +794,9 @@ def algo_worker(
                 w_clash = role_weights.get("clash", 1.0) * rule_scale.get("clash", 1.0)
                 w_bend = role_weights.get("bend", 1.0) * rule_scale.get("bend", 1.0)
                 w_straight = role_weights.get("straight", 1.0) * rule_scale.get("straight", 1.0)
+                # Le zigzag n'est adossé à aucune case à cocher : il n'est
+                # jamais souhaitable, quel que soit le jeu de règles retenu.
+                w_zigzag = role_weights.get("zigzag", 1.0)
                 w_span = role_weights.get("free_span", 1.0) * rule_scale.get("free_span", 1.0)
                 w_fix = role_weights.get("fixation", 1.0) * rule_scale.get("fixation", 1.0)
                 w_length = role_weights.get("length", 1.0)
@@ -792,6 +806,7 @@ def algo_worker(
                     + R_towards
                     + w_bend * R_smooth_total
                     + w_straight * R_straight
+                    + w_zigzag * R_zigzag
                     + w_clash * R_c
                     + w_clearance * R_sensor
                     + w_clearance * R_flatness
@@ -809,6 +824,7 @@ def algo_worker(
                     "Towards": float(R_towards.mean()),
                     "Smooth": float((w_bend * R_smooth_total).mean()),
                     "Straight": float((w_straight * R_straight).mean()),
+                    "Zigzag": float((w_zigzag * R_zigzag).mean()),
                     "Crash": float((w_clash * R_c).mean()),
                     "Sensor": float((w_clearance * R_sensor).mean()),
                     "Flat": float((w_clearance * R_flatness).mean()),

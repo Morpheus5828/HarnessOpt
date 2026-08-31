@@ -136,6 +136,8 @@ FR: dict[str, str] = {
         "Écart angulaire admis entre l'embase du crabe et la structure : au-delà, "
         "le crabe ne repose pas à plat."
     ),
+    "rules.clamps_folder": "Dossier des fixations existantes",
+    "rules.clamps_folder.help": "Modèles STL des fixations déjà montées. L'application les recale sur la maquette et en déduit les passages imposés (p_in / p_out) des peignes. Laisser vide pour ignorer les fixations existantes.",
     "rules.clamp_model": "Modèle de crabe à poser",
     "rules.clamp_model.help": "Fichier STL du crabe utilisé pour vérifier l'encombrement.",
     "rules.reset": "Revenir aux valeurs standard",
@@ -195,8 +197,12 @@ FR: dict[str, str] = {
     "routing.view.unavailable": "Vue 3D indisponible sur ce poste.",
     "routing.view.still_running": "Le calcul du cheminement, lui, continue normalement.",
     "routing.view.none": "Aucune vue 3D à ouvrir pour l'instant.",
+    "routing.prepare.scan": "Analyse des fixations existantes…",
     "routing.prepare.mesh": "Préparation des maillages de travail…",
     "routing.prepare.path": "Recherche du chemin de départ…",
+    "routing.advice": "Conseils",
+    "advice.applied": "Réglage appliqué à l'étape « Règles ». Relancez le cheminement pour qu'il prenne effet.",
+    "advice.not_settable": "Ce conseil ne correspond à aucun réglage : suivez l'indication donnée.",
     "routing.charts": "Progression",
     "routing.advanced": "Réglages avancés",
     "routing.advanced.warn": (
@@ -357,6 +363,8 @@ EN: dict[str, str] = {
         "Angular deviation allowed between the clamp base and the structure: beyond it, "
         "the clamp does not sit flat."
     ),
+    "rules.clamps_folder": "Existing fixations folder",
+    "rules.clamps_folder.help": "STL models of the fixations already installed. They are registered onto the mock-up and the imposed comb passages (p_in / p_out) are derived from them. Leave empty to ignore existing fixations.",
     "rules.clamp_model": "Clamp model to place",
     "rules.clamp_model.help": "STL file of the clamp used to check for interference.",
     "rules.reset": "Back to standard values",
@@ -414,8 +422,12 @@ EN: dict[str, str] = {
     "routing.view.unavailable": "3D view unavailable on this workstation.",
     "routing.view.still_running": "Route computation carries on regardless.",
     "routing.view.none": "No 3D view to open yet.",
+    "routing.prepare.scan": "Scanning existing fixations…",
     "routing.prepare.mesh": "Preparing working meshes…",
     "routing.prepare.path": "Searching for the initial path…",
+    "routing.advice": "Advice",
+    "advice.applied": "Setting applied in the Rules step. Restart the routing for it to take effect.",
+    "advice.not_settable": "This advice maps to no setting: follow the indication given.",
     "routing.charts": "Progress",
     "routing.advanced": "Advanced settings",
     "routing.advanced.warn": (

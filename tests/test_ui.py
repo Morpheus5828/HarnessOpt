@@ -547,3 +547,182 @@ class TestEnTeteEtBarreDEtat:
             assert "Step" in app.lbl_step.cget("text")
         finally:
             app.set_language("FR")
+
+
+class TestConseils:
+    """Onglet « Conseils » de la page Cheminement."""
+
+    def test_l_onglet_existe(self, app):
+        assert "advice" in app.pages[2]._tab_names
+
+    def test_aucun_conseil_affiche_une_explication(self, app):
+        board = app.pages[2].advice_board
+        board.clear()
+        assert board.count() == 0
+        assert "conseil" in board.lbl_empty.cget("text").lower()
+
+    def test_un_conseil_produit_une_carte(self, app):
+        from core.diagnostics import Suggestion
+
+        board = app.pages[2].advice_board
+        board.update_advice([Suggestion(
+            key="k", severity="major",
+            title_fr="Titre", title_en="Title",
+            detail_fr="Constat", detail_en="Detail",
+            action_fr="Action", action_en="Action",
+            setting="min_margin", value=6.0,
+        )])
+        try:
+            assert board.count() == 1
+            assert len(board.cards_box.winfo_children()) == 1
+        finally:
+            board.clear()
+
+    def test_un_conseil_sans_reglage_n_a_pas_de_bouton(self, app):
+        from core.diagnostics import Suggestion
+        from ui.widgets import AdviceCard
+
+        page = app.pages[2]
+        card = AdviceCard(page, Suggestion(
+            key="clash", severity="blocking",
+            title_fr="T", title_en="T", detail_fr="D", detail_en="D",
+            action_fr="A", action_en="A",
+        ), on_apply=lambda _s: None)
+        try:
+            assert card.btn_apply is None
+        finally:
+            card.destroy()
+
+    def test_un_conseil_applicable_a_un_bouton(self, app):
+        from core.diagnostics import Suggestion
+        from ui.widgets import AdviceCard
+
+        page = app.pages[2]
+        card = AdviceCard(page, Suggestion(
+            key="clearance_min", severity="blocking",
+            title_fr="T", title_en="T", detail_fr="D", detail_en="D",
+            action_fr="A", action_en="A", setting="min_margin", value=6.0,
+        ), on_apply=lambda _s: None)
+        try:
+            assert card.btn_apply is not None
+        finally:
+            card.destroy()
+
+    def test_appliquer_un_conseil_ecrit_dans_la_page_des_regles(self, app):
+        from core.diagnostics import Suggestion
+
+        rules_page = app.pages[1]
+        before = rules_page.f_min.get(10.0)
+        try:
+            applied = app.controller.apply_suggestion(Suggestion(
+                key="clearance_min", severity="blocking",
+                title_fr="T", title_en="T", detail_fr="D", detail_en="D",
+                action_fr="A", action_en="A", setting="min_margin", value=6.0,
+            ))
+            assert applied is True
+            assert rules_page.f_min.get(0.0) == pytest.approx(6.0)
+        finally:
+            rules_page.f_min.set(before)
+
+    def test_un_conseil_sans_reglage_n_est_pas_applique(self, app):
+        from core.diagnostics import Suggestion
+
+        assert app.controller.apply_suggestion(Suggestion(
+            key="clash", severity="blocking",
+            title_fr="T", title_en="T", detail_fr="D", detail_en="D",
+            action_fr="A", action_en="A",
+        )) is False
+
+    def test_l_onglet_annonce_le_nombre_de_conseils(self, app):
+        from core.diagnostics import Suggestion
+
+        page = app.pages[2]
+        page.advice_board.update_advice([
+            Suggestion(key=f"k{i}", severity="info", title_fr="T", title_en="T",
+                       detail_fr="D", detail_en="D", action_fr="A", action_en="A")
+            for i in range(2)
+        ])
+        page._refresh_advice_tab()
+        try:
+            assert "(2)" in page._tab_names["advice"]
+        finally:
+            page.advice_board.clear()
+            page._refresh_advice_tab()
+
+
+class TestScanDeFixations:
+    """Restitution du scan des fixations existantes."""
+
+    @staticmethod
+    def _result(n_passages=3):
+        from core.fixation_scan import summarise
+
+        points = []
+        for i in range(n_passages):
+            points.append([float(i * 20), 0.0, 0.0])
+            points.append([float(i * 20), 50.0, 0.0])
+        return summarise([{
+            "name": "peigne.stl", "position": [0, 0, 0], "score": 0.9,
+            "routing_points": points,
+        }])
+
+    def test_le_bandeau_est_cache_sans_scan(self, app):
+        """On teste la présence dans la grille, pas l'affichage à l'écran.
+
+        ``winfo_ismapped`` vaut toujours 0 sur une page non affichée : il
+        rendrait le test vert sans rien vérifier.
+        """
+        page = app.pages[2]
+        page.show_fixation_scan(self._result(1))
+        assert page.scan_box.grid_info()
+        page.show_fixation_scan(None)
+        assert not page.scan_box.grid_info()
+
+    def test_un_scan_reussi_annonce_le_compte(self, app):
+        page = app.pages[2]
+        page.show_fixation_scan(self._result(3))
+        app.update()
+        try:
+            text = page.lbl_scan.cget("text")
+            assert "1" in text and "3" in text
+        finally:
+            page.show_fixation_scan(None)
+
+    def test_les_passages_sont_listes_avec_p_in_et_p_out(self, app):
+        page = app.pages[2]
+        page.show_fixation_scan(self._result(3))
+        app.update()
+        try:
+            lignes = [w.cget("text") for w in page.scan_passages.winfo_children()]
+            assert len(lignes) == 3
+            assert all("p_in" in ligne and "p_out" in ligne for ligne in lignes)
+        finally:
+            page.show_fixation_scan(None)
+
+    def test_une_longue_liste_est_tronquee_avec_mention(self, app):
+        from ui.pages.routing_page import MAX_LISTED_PASSAGES
+
+        page = app.pages[2]
+        page.show_fixation_scan(self._result(MAX_LISTED_PASSAGES + 5))
+        app.update()
+        try:
+            lignes = page.scan_passages.winfo_children()
+            assert len(lignes) == MAX_LISTED_PASSAGES + 1
+            assert "5" in lignes[-1].cget("text")
+        finally:
+            page.show_fixation_scan(None)
+
+    def test_un_scan_impossible_est_explique(self, app):
+        from core.fixation_scan import NO_OPEN3D, ScanResult
+
+        page = app.pages[2]
+        page.show_fixation_scan(ScanResult(skipped_reason=NO_OPEN3D))
+        app.update()
+        try:
+            assert "Open3D" in page.lbl_scan.cget("text")
+            assert page.scan_box.grid_info(), "le bandeau doit rester visible pour expliquer"
+        finally:
+            page.show_fixation_scan(None)
+
+    def test_le_dossier_de_fixations_est_collecte(self, app):
+        assert "clamps_folder" in app.pages[1].collect()

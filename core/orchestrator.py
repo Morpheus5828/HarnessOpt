@@ -96,6 +96,7 @@ BASE_WEIGHTS = {
     "clash": 1.0,       # ne rien traverser
     "bend": 1.0,        # rayon de cintrage
     "straight": 1.0,    # longues lignes droites
+    "zigzag": 1.0,      # ne pas osciller (aucun rôle ne descend en dessous)
     "free_span": 1.0,   # ne pas traverser le vide
     "fixation": 1.0,    # crabes tous les 250 mm, posés à plat
     "length": 1.0,      # ne pas rallonger inutilement
@@ -123,7 +124,8 @@ ROLES: dict[str, Role] = {
         ),
         color="#00B4D8",
         algo="td3",
-        weights=_weights(clash=1.6, free_span=1.5, clearance=1.2, bend=0.4, straight=0.4, fixation=0.3),
+        weights=_weights(clash=1.6, free_span=1.5, clearance=1.2, bend=0.4, straight=0.4,
+                         fixation=0.3, zigzag=1.0),
         noise_scale=1.6,
         shift_scale=1.5,
         momentum=0.3,
@@ -144,7 +146,8 @@ ROLES: dict[str, Role] = {
         ),
         color="#EF476F",
         algo="td3",
-        weights=_weights(clearance=2.0, clash=2.0, free_span=1.2, bend=0.7, straight=0.6, fixation=0.5),
+        weights=_weights(clearance=2.0, clash=2.0, free_span=1.2, bend=0.7, straight=0.6,
+                         fixation=0.5, zigzag=1.0),
         noise_scale=0.9,
         shift_scale=1.0,
         momentum=0.5,
@@ -164,7 +167,8 @@ ROLES: dict[str, Role] = {
         ),
         color="#118AB2",
         algo="sac",
-        weights=_weights(bend=2.2, straight=1.4, clearance=1.0, clash=1.0, fixation=0.6, length=1.2),
+        weights=_weights(bend=2.2, straight=1.4, clearance=1.0, clash=1.0, fixation=0.6,
+                         length=1.2, zigzag=2.0),
         noise_scale=0.4,
         shift_scale=0.6,
         momentum=0.8,
@@ -185,7 +189,8 @@ ROLES: dict[str, Role] = {
         ),
         color="#06D6A0",
         algo="recurrent_td3",
-        weights=_weights(straight=2.4, bend=1.6, length=1.4, clearance=1.0, clash=1.0, fixation=0.5),
+        weights=_weights(straight=2.4, bend=1.6, length=1.4, clearance=1.0, clash=1.0,
+                         fixation=0.5, zigzag=2.2),
         noise_scale=0.5,
         shift_scale=0.8,
         momentum=0.75,
@@ -206,7 +211,8 @@ ROLES: dict[str, Role] = {
         ),
         color="#FFD166",
         algo="recurrent_td3",
-        weights=_weights(fixation=2.6, clearance=1.3, clash=1.2, free_span=1.4, bend=0.8, straight=0.7),
+        weights=_weights(fixation=2.6, clearance=1.3, clash=1.2, free_span=1.4, bend=0.8,
+                         straight=0.7, zigzag=1.0),
         noise_scale=1.1,
         shift_scale=1.0,
         momentum=0.5,

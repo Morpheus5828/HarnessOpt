@@ -1,5 +1,6 @@
 """Composants d'interface réutilisables."""
 
+from ui.widgets.advice import AdviceBoard, AdviceCard
 from ui.widgets.agents import AgentBoard, PhaseIndicator
 from ui.widgets.cards import Card, Divider, HelpText, KpiRow, KpiTile, SectionTitle, StatusPill
 from ui.widgets.compliance import ComplianceTable, VerdictBanner
@@ -16,6 +17,8 @@ from ui.widgets.rules import RuleToggle, RuleToggleList
 from ui.widgets.stepper import Stepper
 
 __all__ = [
+    "AdviceBoard",
+    "AdviceCard",
     "AgentBoard",
     "Card",
     "ChoiceField",

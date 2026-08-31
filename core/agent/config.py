@@ -41,6 +41,8 @@ CONFIG = {
     # le plafond ne dépendait que de la largeur de la bande de distance et
     # pouvait atteindre plusieurs centaines de millimètres.
     "max_step_mm": 25.0,
+    # Pénalité d'inversion du sens de virage (zigzag).
+    "zigzag_weight": 60.0,
     "hard_max_clearance": 100.0,
 
     # --- "Route" (grande surface plane) vs "chemin de terre" (rebord étroit) ---

@@ -23,6 +23,7 @@ from core.orchestrator import ROLES, TEAM_PRESETS, ExplorationPolicy, Phase
 from core.path_planner import STRATEGIES
 from ui.theme import FONT, SPACE, current
 from ui.widgets import (
+    AdviceBoard,
     AgentBoard,
     Card,
     ChoiceField,
@@ -36,6 +37,9 @@ from ui.widgets import (
 )
 
 __all__ = ["RoutingPage"]
+
+#: Au-delà, la liste des passages mangerait tout l'écran.
+MAX_LISTED_PASSAGES = 8
 
 
 class RoutingPage(ctk.CTkFrame):
@@ -239,8 +243,8 @@ class RoutingPage(ctk.CTkFrame):
 
         right = ctk.CTkFrame(parent, fg_color="transparent")
         right.grid(row=0, column=1, sticky="nsew", padx=(SPACE.SM, 0))
-        right.grid_rowconfigure(2, weight=4)
-        right.grid_rowconfigure(3, weight=5)
+        right.grid_rowconfigure(3, weight=4)
+        right.grid_rowconfigure(4, weight=5)
         right.grid_columnconfigure(0, weight=1)
 
         # --- avancement ---------------------------------------------------
@@ -276,9 +280,27 @@ class RoutingPage(ctk.CTkFrame):
         )
         self.kpis.pack(fill="x")
 
+        # --- fixations existantes ---------------------------------------------
+        # Le résultat du scan était jusqu'ici invisible : l'utilisateur ne
+        # pouvait pas savoir si l'application avait reconnu les fixations déjà
+        # montées, ni quels passages elle en avait déduits.
+        self.scan_box = ctk.CTkFrame(
+            right, fg_color=theme.SURFACE, border_width=1,
+            border_color=theme.BORDER, corner_radius=SPACE.RADIUS,
+        )
+
+        self.lbl_scan = ctk.CTkLabel(
+            self.scan_box, text="", font=FONT.SMALL_BOLD, text_color=theme.TEXT,
+            anchor="w", justify="left", wraplength=760,
+        )
+        self.lbl_scan.pack(fill="x", padx=SPACE.MD, pady=(SPACE.SM, 0))
+
+        self.scan_passages = ctk.CTkFrame(self.scan_box, fg_color="transparent")
+        self.scan_passages.pack(fill="x", padx=SPACE.MD, pady=(SPACE.XS, SPACE.SM))
+
         # --- options d'affichage 3D ------------------------------------------
         view_bar = ctk.CTkFrame(right, fg_color="transparent")
-        view_bar.grid(row=1, column=0, sticky="ew", pady=(0, SPACE.XS))
+        view_bar.grid(row=2, column=0, sticky="ew", pady=(0, SPACE.XS))
 
         self.lbl_view = ctk.CTkLabel(
             view_bar, text=t("routing.view"), font=FONT.SMALL_BOLD, text_color=theme.TEXT_SOFT
@@ -313,7 +335,7 @@ class RoutingPage(ctk.CTkFrame):
             right, fg_color=theme.SURFACE, border_width=1,
             border_color=theme.BORDER, corner_radius=SPACE.RADIUS,
         )
-        view_frame.grid(row=2, column=0, sticky="nsew", pady=(0, SPACE.SM))
+        view_frame.grid(row=3, column=0, sticky="nsew", pady=(0, SPACE.SM))
 
         self.viewer_container = ctk.CTkFrame(view_frame, fg_color=("#EDEFF3", "#0E1116"),
                                              corner_radius=SPACE.RADIUS_SM)
@@ -328,10 +350,11 @@ class RoutingPage(ctk.CTkFrame):
             right, fg_color=theme.SURFACE, segmented_button_selected_color=theme.accent,
             segmented_button_selected_hover_color=theme.accent, corner_radius=SPACE.RADIUS,
         )
-        self.tabs.grid(row=3, column=0, sticky="nsew")
+        self.tabs.grid(row=4, column=0, sticky="nsew")
 
         self._tab_names = {
             "compliance": t("routing.compliance"),
+            "advice": t("routing.advice"),
             "agents": t("routing.agents"),
             "charts": t("routing.charts"),
         }
@@ -345,6 +368,15 @@ class RoutingPage(ctk.CTkFrame):
         self.compliance = ComplianceTable(compliance_tab, lang=self.app.t.lang)
         self.compliance.set_placeholder(t("report.verdict.none"))
         self.compliance.pack(fill="both", expand=True)
+
+        advice_tab = ctk.CTkScrollableFrame(
+            self.tabs.tab(self._tab_names["advice"]), fg_color="transparent"
+        )
+        advice_tab.pack(fill="both", expand=True)
+        self.advice_board = AdviceBoard(
+            advice_tab, lang=self.app.t.lang, on_apply=self._on_apply_advice
+        )
+        self.advice_board.pack(fill="both", expand=True)
 
         agents_tab = ctk.CTkScrollableFrame(
             self.tabs.tab(self._tab_names["agents"]), fg_color="transparent"
@@ -404,6 +436,16 @@ class RoutingPage(ctk.CTkFrame):
         self.app.controller.update_3d_visibility(
             {key: bool(box.get()) for key, box in self.view_toggles.items()}
         )
+
+    def _on_apply_advice(self, suggestion):
+        """Applique un conseil au réglage correspondant, à l'étape « Règles ».
+
+        Le changement n'est pas appliqué à chaud : les agents ont recopié les
+        règles au démarrage, et n'en modifier qu'une partie en cours de route
+        produirait un mélange incohérent entre la récompense et le rapport. On
+        écrit donc dans la page « Règles » et on invite à relancer.
+        """
+        self.app.controller.apply_suggestion(suggestion)
 
     def _on_detach(self):
         self.app.controller.detach_3d()
@@ -479,6 +521,8 @@ class RoutingPage(ctk.CTkFrame):
 
         report = snapshot.get("report")
         self.compliance.update_report(report)
+        self.advice_board.update_advice(snapshot.get("advice"))
+        self._refresh_advice_tab()
 
         if report is not None:
             k = report.kpis
@@ -512,6 +556,67 @@ class RoutingPage(ctk.CTkFrame):
         if team.get("best"):
             info.append(f"{self.t('routing.best')} : {team['best']}")
         self.lbl_run_info.configure(text="   ·   ".join(info))
+
+    def show_fixation_scan(self, result):
+        """Affiche le résultat du scan des fixations existantes.
+
+        Les passages ``p_in`` / ``p_out`` sont listés explicitement : ce sont
+        des contraintes de passage, pas des indications. Un faisceau qui ne
+        traverse pas l'encoche n'est pas posable, et l'utilisateur doit pouvoir
+        vérifier que l'application a bien reconnu les bonnes.
+        """
+        theme = current()
+        for widget in self.scan_passages.winfo_children():
+            widget.destroy()
+
+        if result is None:
+            self.scan_box.grid_remove()
+            return
+
+        lang = self.app.t.lang
+        self.scan_box.grid(row=1, column=0, sticky="ew", pady=(0, SPACE.SM))
+
+        if not result.ran:
+            self.lbl_scan.configure(
+                text=f"🔎  {result.message(lang)}", text_color=theme.TEXT_FAINT
+            )
+            return
+
+        colour = theme.ok if result.n_fixations else theme.TEXT_SOFT
+        self.lbl_scan.configure(text=f"🔎  {result.message(lang)}", text_color=colour)
+
+        for passage in result.passages[:MAX_LISTED_PASSAGES]:
+            ctk.CTkLabel(
+                self.scan_passages, text=passage.format(lang), font=FONT.CODE,
+                text_color=theme.TEXT_SOFT, anchor="w",
+            ).pack(fill="x")
+
+        remaining = result.n_passages - MAX_LISTED_PASSAGES
+        if remaining > 0:
+            more = (f"… and {remaining} more passage(s)"
+                    if self.app.t.is_english else
+                    f"… et {remaining} passage(s) de plus")
+            ctk.CTkLabel(
+                self.scan_passages, text=more, font=FONT.TINY,
+                text_color=theme.TEXT_FAINT, anchor="w",
+            ).pack(fill="x")
+
+    def _refresh_advice_tab(self):
+        """Affiche le nombre de conseils sur l'onglet.
+
+        Sans cela, un conseil déposé dans un onglet non affiché n'est jamais vu.
+        """
+        count = self.advice_board.count()
+        label = self.t("routing.advice")
+        wanted = f"{label} ({count})" if count else label
+        current_name = self._tab_names["advice"]
+        if wanted == current_name:
+            return
+        try:
+            self.tabs.rename(current_name, wanted)
+        except Exception:
+            return
+        self._tab_names["advice"] = wanted
 
     def set_detached(self, detached: bool):
         self.btn_detach.configure(
@@ -558,4 +663,5 @@ class RoutingPage(ctk.CTkFrame):
         )
         self.compliance.set_language(self.app.t.lang)
         self.compliance.set_placeholder(t("report.verdict.none"))
+        self.advice_board.update_language(self.app.t.lang)
         self._on_team_changed(self.f_team.get())

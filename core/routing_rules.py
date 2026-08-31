@@ -475,6 +475,9 @@ class RouteReport:
             on("free_span", round(float(k.get("longest_free_span_mm", 0.0)), 1)),
             on("straightness", round(-float(k.get("straight_ratio", 0.0)), 4)),
             on("straightness", round(float(k.get("total_turning_deg", 0.0)), 1)),
+            # Les oscillations ne dépendent d'aucune case à cocher : un zigzag
+            # n'est jamais acceptable, quel que soit le jeu de règles retenu.
+            int(k.get("n_zigzags", 0)),
             # La longueur reste toujours départageante : elle n'est pas une
             # règle d'intégration mais le critère de dernier recours entre
             # deux routes également conformes.
@@ -788,6 +791,11 @@ def evaluate_route(
     # ------------------------------------------------------------------
     # 6. Qualité du tracé : rester droit le plus longtemps possible
     # ------------------------------------------------------------------
+    # Oscillations : mesurées à part de la courbure totale, car un arc régulier
+    # accumule beaucoup de courbure sans jamais osciller, et une succession de
+    # petits virages alternés fait l'inverse.
+    kpis.update(gm.zigzag_metrics(pts, rules.straight_tol_deg))
+
     checks.append(
         RuleCheck(
             rule_id="straightness",
