@@ -888,3 +888,80 @@ class TestAffichage3DDesFixations:
             assert "17" in page.lbl_scan.cget("text")
         finally:
             page.show_fixation_scan(None)
+
+
+class TestFenetreDeConfirmationDesFixations:
+    """La question posée à l'utilisateur avant d'emprunter les fixations."""
+
+    @staticmethod
+    def _scan(n_passages=2, scanned=9):
+        from core.fixation_scan import summarise
+
+        points = []
+        for i in range(n_passages):
+            points.append([float(i * 100), -40.0, 0.0])
+            points.append([float(i * 100), 40.0, 0.0])
+        return summarise([{"name": "peigne.stl", "position": [0.0, 0.0, 0.0],
+                           "score": 0.9, "routing_points": points}],
+                         scanned_files=scanned)
+
+    def test_la_question_montre_le_compte_et_les_passages(self, app, monkeypatch):
+        vu = {}
+
+        def faux_askyesno(title, message, **kwargs):
+            vu["titre"] = title
+            vu["message"] = message
+            return True
+
+        monkeypatch.setattr("ui.app_window.messagebox.askyesno", faux_askyesno)
+        assert app.ask_use_fixations(self._scan(2, scanned=9)) is True
+        assert "9" in vu["message"]
+        assert "p_in" in vu["message"] and "p_out" in vu["message"]
+        assert "n° 1" in vu["message"] and "n° 2" in vu["message"]
+
+    def test_un_refus_est_rendu_tel_quel(self, app, monkeypatch):
+        monkeypatch.setattr("ui.app_window.messagebox.askyesno",
+                            lambda *a, **k: False)
+        assert app.ask_use_fixations(self._scan(1)) is False
+
+    def test_une_fenetre_en_echec_retombe_sur_le_defaut(self, app, monkeypatch):
+        def explose(*_a, **_k):
+            raise RuntimeError("pas d'affichage")
+
+        monkeypatch.setattr("ui.app_window.messagebox.askyesno", explose)
+        assert app.ask_use_fixations(self._scan(1), default=True) is True
+        assert app.ask_use_fixations(self._scan(1), default=False) is False
+
+    def test_la_question_n_est_pas_posee_sans_passage(self, app, monkeypatch):
+        """Interrompre l'utilisateur pour rien serait gratuit."""
+        from core.fixation_scan import ScanResult
+
+        appels = []
+        monkeypatch.setattr("ui.app_window.messagebox.askyesno",
+                            lambda *a, **k: appels.append(1) or True)
+        assert app.controller._ask_use_fixations(ScanResult(), default=False) is False
+        assert app.controller._ask_use_fixations(None, default=True) is True
+        assert appels == []
+
+    def test_la_reponse_est_reportee_sur_la_page(self, app, monkeypatch):
+        monkeypatch.setattr("ui.app_window.messagebox.askyesno",
+                            lambda *a, **k: False)
+        page = app.pages[2]
+        page.f_use_fixations.var.set(True)
+        try:
+            reponse = app.controller._ask_use_fixations(self._scan(1), default=True)
+            app.update()
+            assert reponse is False
+            assert page.f_use_fixations.get() is False
+        finally:
+            page.f_use_fixations.var.set(True)
+
+    def test_la_page_expose_un_moyen_de_refleter_la_reponse(self, app):
+        page = app.pages[2]
+        try:
+            page.set_use_fixations(False)
+            assert page.f_use_fixations.get() is False
+            page.set_use_fixations(True)
+            assert page.f_use_fixations.get() is True
+        finally:
+            page.f_use_fixations.var.set(True)
