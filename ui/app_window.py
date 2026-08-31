@@ -285,6 +285,46 @@ class AppWindow(ctk.CTk):
 
     # -- barre d'état ---------------------------------------------------------
 
+    def ask_use_fixations(self, scan_result, default: bool = True) -> bool:
+        """Demande si le câble doit emprunter les fixations reconnues.
+
+        La question arrive une fois le scan terminé et les passages déjà
+        dessinés en 3D : l'utilisateur répond en voyant ce dont on parle,
+        plutôt que sur une liste de coordonnées.
+        """
+        lang = self.t.lang
+        english = self.t.is_english
+
+        detail = scan_result.message(lang)
+        lines = [passage.format(lang, number=n)
+                 for n, passage in enumerate(scan_result.passages[:6], start=1)]
+        if scan_result.n_passages > 6:
+            lines.append("…")
+
+        if english:
+            question = (
+                f"{detail}\n\n"
+                + "\n".join(lines)
+                + "\n\nShould the harness go through them?\n\n"
+                "Yes — the route crosses every notch and the agents keep it there.\n"
+                "No — the agents pick their own way."
+            )
+            title = "Existing fixations detected"
+        else:
+            question = (
+                f"{detail}\n\n"
+                + "\n".join(lines)
+                + "\n\nFaut-il faire passer le faisceau par ces fixations ?\n\n"
+                "Oui — le tracé traverse chaque encoche et les agents l'y maintiennent.\n"
+                "Non — les agents choisissent librement leur passage."
+            )
+            title = "Fixations existantes détectées"
+
+        try:
+            return bool(messagebox.askyesno(title, question, default="yes" if default else "no"))
+        except Exception:
+            return default
+
     def set_status(self, message: str, tone: str = "neutral"):
         theme = current()
         color = {

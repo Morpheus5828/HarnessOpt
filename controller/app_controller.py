@@ -33,6 +33,11 @@ from core.routing_rules import ALL_RULES, ClearanceModel, HarnessSpec, RoutingRu
 
 __all__ = ["AppController"]
 
+#: Attente maximale d'une réponse de l'utilisateur, en secondes. Passé ce
+#: délai, le lancement reprend avec le réglage déjà présent sur la page plutôt
+#: que de rester bloqué sur une fenêtre que personne ne regarde.
+ASK_TIMEOUT_S = 300
+
 #: Cadence de rafraîchissement de l'interface pendant le calcul, en ms.
 REFRESH_RUNNING_MS = 250
 REFRESH_IDLE_MS = 700
@@ -372,6 +377,23 @@ class AppController:
                 rule_values.get("clamps_folder", ""),
             )
             self.scan_result = scan_result
+            self._post(self.view.pages[2].show_fixation_scan, scan_result)
+            self._post(self._draw_fixations, scan_result)
+
+            # Le choix de l'utilisateur commande tout : s'il refuse d'emprunter
+            # les fixations, les agents ne doivent ni y être attirés ni y être
+            # retenus. Transmettre la liste « au cas où » reviendrait à lui
+            # imposer un passage qu'il vient de refuser.
+            # La question est posée à l'utilisateur, pas déduite : emprunter une
+            # fixation contraint le tracé à passer là, ce qui peut le rallonger
+            # ou l'écarter du meilleur passage. Il doit trancher en connaissance
+            # de cause, et le voir sur la vue 3D avant de répondre.
+            values["use_fixations"] = self._ask_use_fixations(
+                scan_result, bool(values.get("use_fixations", True))
+            )
+            use_fixations = bool(values["use_fixations"])
+            passages = self._passages_to_use(values)
+
             config["existing_crabes"] = [
                 {
                     "name": f.name,
@@ -384,9 +406,16 @@ class AppController:
                     ],
                 }
                 for f in scan_result.fixations
+            ] if use_fixations else []
+
+            # Points que le câble doit traverser, épinglés par les agents à
+            # chaque itération. L'attraction par récompense ne suffit pas :
+            # elle rapproche le câble de l'encoche sans garantir qu'il y passe.
+            config["mandatory_points"] = [
+                list(point)
+                for passage in passages
+                for point in (passage.p_in, passage.p_out)
             ]
-            self._post(self.view.pages[2].show_fixation_scan, scan_result)
-            self._post(self._draw_fixations, scan_result)
 
             self.shared_state = {
                 "is_playing": False,
@@ -790,6 +819,49 @@ class AppController:
             self.viewer.show_sphere(self.point_b, "point_b", radius=25.0, color="#D93A45")
         self.viewer.reset_camera()
         self.viewer.render()
+
+    def _ask_use_fixations(self, scan_result, default: bool) -> bool:
+        """Demande s'il faut faire passer le câble par les fixations reconnues.
+
+        La question n'est posée que lorsqu'elle se pose : sans passage détecté,
+        il n'y a rien à emprunter et interrompre l'utilisateur serait gratuit.
+
+        Le lancement se fait dans un fil de travail, la fenêtre doit s'ouvrir
+        sur celui de Tk : on attend donc la réponse. L'attente est bornée —
+        une fenêtre restée sans réponse ne doit pas immobiliser le calcul pour
+        toujours, on retombe alors sur le réglage de la page.
+        """
+        if scan_result is None or not scan_result.ran or not scan_result.passages:
+            return default
+
+        def ask():
+            try:
+                return bool(self.view.ask_use_fixations(scan_result, default))
+            except Exception:
+                return default
+
+        if threading.current_thread() is threading.main_thread():
+            # Déjà sur le fil de Tk : passer par ``after`` puis attendre la
+            # réponse serait un interblocage, la boucle d'évènements étant
+            # justement celle qu'on bloquerait.
+            answer = {"value": ask()}
+        else:
+            answer = {"value": default}
+            answered = threading.Event()
+
+            def ask_on_ui():
+                try:
+                    answer["value"] = ask()
+                finally:
+                    answered.set()
+
+            self._post(ask_on_ui)
+            answered.wait(timeout=ASK_TIMEOUT_S)
+
+        # La page reflète la réponse : l'utilisateur retrouve son choix au même
+        # endroit que s'il l'avait coché lui-même, et il est mémorisé.
+        self._post(self.view.pages[2].set_use_fixations, answer["value"])
+        return bool(answer["value"])
 
     def _draw_fixations(self, scan_result):
         """Place les fixations reconnues dans la vue 3D.

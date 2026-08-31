@@ -313,13 +313,31 @@ auparavant — le viewer savait masquer les acteurs `clamp_`, mais aucun n'étai
 jamais créé, et l'utilisateur n'avait aucun moyen de vérifier ce que le scan
 avait reconnu.
 
-L'interrupteur **« Emprunter les fixations existantes »** décide si le câble
-doit y passer. Quand il est actif, le trajet est **découpé en tronçons** par
-les couples entrée/sortie, ordonnés le long de A→B et orientés dans le sens de
-la marche ; chaque tronçon est planifié séparément puis recollé. La traversée
-de l'encoche elle-même est une ligne droite : y lancer une recherche de chemin
-ferait contourner le peigne au lieu de passer dedans. C'est ce découpage qui
-garantit que le câble passe **par** les fixations et pas seulement à côté.
+Une fois le scan terminé et les passages dessinés, l'application **pose la
+question** : « faut-il faire passer le faisceau par ces fixations ? ». Elle
+arrive après l'affichage, pas avant : l'utilisateur répond en voyant ce dont on
+parle, plutôt que sur une liste de coordonnées. Sa réponse se retrouve sur
+l'interrupteur *Emprunter les fixations existantes* de la page, et y reste
+mémorisée. Sans passage détecté, aucune question n'est posée.
+
+**Répondre oui contraint deux choses.** Le chemin de départ est découpé en
+tronçons par les couples entrée/sortie, ordonnés le long de A→B et orientés
+dans le sens de la marche ; la traversée de l'encoche elle-même est une ligne
+droite, y lancer une recherche de chemin ferait contourner le peigne au lieu
+de passer dedans. Et surtout, **les agents y sont maintenus** : à chaque
+itération le point le plus proche de chaque passage est ramené exactement
+dessus, puis retiré des points que l'agent peut déplacer.
+
+Cette dernière contrainte n'est pas un excès de prudence. L'agent dispose déjà
+d'une attraction par récompense vers les fixations existantes ; mesurée sur une
+vraie boucle, elle ne suffit pas. Après deux cents itérations, le câble s'écarte
+de **220 à 350 mm** des encoches — une encoche de peigne ne se négocie pas à
+cette distance. Avec l'épinglage, l'écart mesuré est de **0,0 mm** sur tous les
+passages, pour tous les agents.
+
+Répondre non annule tout : ni découpage du trajet, ni épinglage, ni même
+l'attraction par récompense — la liste des fixations n'est pas transmise aux
+agents. Un refus doit être un vrai refus.
 
 Le détecteur repose sur Open3D. Sans lui, le scan ne plante pas : il dit
 pourquoi il n'a pas eu lieu, et le cheminement continue sans fixations
@@ -455,7 +473,7 @@ ui/
   charts.py                 courbes (récompense + grandeurs physiques)
   viewer3d.py               vue 3D incrustée (fil de rendu dédié)
   widgets/  pages/          composants et écrans
-tests/                      298 tests hors interface, 127 tests d'interface
+tests/                      312 tests hors interface, 133 tests d'interface
 ```
 
 `core/geometry_metrics.py`, `core/routing_rules.py`, `core/reward_terms.py` et

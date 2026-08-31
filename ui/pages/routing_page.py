@@ -617,6 +617,15 @@ class RoutingPage(ctk.CTkFrame):
                 text_color=theme.TEXT_FAINT, anchor="w",
             ).pack(fill="x")
 
+    def set_use_fixations(self, value: bool):
+        """Reflète la réponse donnée à la fenêtre de confirmation.
+
+        L'utilisateur retrouve son choix là où il l'aurait coché lui-même, et
+        il est mémorisé pour la session suivante.
+        """
+        self.f_use_fixations.var.set(bool(value))
+        self.app.remember(use_fixations=bool(value))
+
     def _refresh_advice_tab(self):
         """Affiche le nombre de conseils sur l'onglet.
 

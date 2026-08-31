@@ -480,6 +480,48 @@ def generate_dense_waypoints(start, goal, num_points, mesh=None, intermediate_po
         return np.linspace(start, goal, num_points, dtype=np.float32)
 
 
+def snap_mandatory_points(waypoints, targets, used=None):
+    """Ramène le tracé exactement sur les points de passage imposés.
+
+    Une attraction par récompense ne suffit pas quand l'utilisateur a demandé
+    d'emprunter une fixation : elle *incite* le câble à s'en approcher, elle ne
+    garantit rien. Un peigne, lui, impose au câble de traverser son encoche —
+    à quelques millimètres près, il n'y passe pas.
+
+    On force donc le point le plus proche de chaque passage à coïncider avec
+    lui, et on renvoie les indices concernés pour que l'agent cesse de les
+    déplacer. Les deux extrémités sont exclues : elles appartiennent aux
+    équipements et ne se négocient pas non plus.
+
+    Args:
+        waypoints: trajectoire ``(n, 3)``, modifiée sur place.
+        targets: points imposés ``(m, 3)``, ou ``None``.
+        used: indices déjà réservés, à ne pas réattribuer.
+
+    Returns:
+        L'ensemble des indices verrouillés.
+    """
+    if targets is None or len(targets) == 0 or len(waypoints) < 3:
+        return set()
+
+    locked = set(used or ())
+    for target in np.asarray(targets, dtype=np.float32):
+        distances = np.linalg.norm(waypoints - target, axis=1)
+        # Extrémités et points déjà attribués : hors jeu. Deux passages
+        # distincts ne peuvent pas partager le même point du câble.
+        distances[0] = np.inf
+        distances[-1] = np.inf
+        for index in locked:
+            if 0 <= index < len(distances):
+                distances[index] = np.inf
+        if not np.isfinite(distances).any():
+            break
+        index = int(np.argmin(distances))
+        waypoints[index] = target
+        locked.add(index)
+    return locked
+
+
 def get_segment_test_points(wps, steps=10):
     if len(wps) < 2:
         return wps

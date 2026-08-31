@@ -160,6 +160,18 @@ def algo_worker(
 
         with data_lock:
             cfg = shared_state["config"]
+
+            # Points de passage imposés : les encoches que l'utilisateur a
+            # choisi d'emprunter. Une attraction par récompense *incite* le
+            # câble à s'en approcher ; elle ne garantit pas qu'il y passe. Ces
+            # points sont donc épinglés à chaque itération et retirés de ceux
+            # que l'agent déplace. Relus ici : le jeu peut changer d'une
+            # session à l'autre sans relancer le fil.
+            raw_mandatory = cfg.get("mandatory_points") or []
+            mandatory_points = (
+                np.asarray(raw_mandatory, dtype=np.float32).reshape(-1, 3)
+                if len(raw_mandatory) else None
+            )
             exploration_noise = cfg["exploration_noise_start"]
             local_pts = int(cfg["initial_points"])
 
@@ -448,10 +460,19 @@ def algo_worker(
             vectors_to_wp = wp_current - closest_pts
             inside_mask = np.einsum('ij,ij->i', vectors_to_wp, face_normals) < 0
 
+            # Les passages imposés sont replacés avant tout calcul : l'agent
+            # travaille donc sur une trajectoire qui les respecte déjà.
+            mandatory_locked = snap_mandatory_points(wp_current, mandatory_points)
+            if mandatory_locked:
+                new_waypoints = wp_current.copy()
+
             danger_indices = np.arange(1, len(wp_current) - 1)
+            frozen = set(mandatory_locked)
             if crabe_focus and locked_crabe_indices:
+                frozen |= set(locked_crabe_indices)
+            if frozen:
                 danger_indices = np.array(
-                    [i for i in danger_indices if i not in locked_crabe_indices], dtype=danger_indices.dtype
+                    [i for i in danger_indices if i not in frozen], dtype=danger_indices.dtype
                 )
 
             local_reward = 0.0
@@ -960,6 +981,11 @@ def algo_worker(
                     if 0 <= idx < len(smoothed_waypoints) and idx in locked_crabe_data:
                         smoothed_waypoints[idx] = locked_crabe_data[idx]["position"]
 
+            # Lissage, écrêtage et repli sur la meilleure solution ont pu tirer
+            # le câble hors des encoches : on l'y remet. Les indices sont
+            # recalculés, le raffinement adaptatif ayant pu en insérer.
+            snap_mandatory_points(smoothed_waypoints, mandatory_points)
+
             test_pts = get_segment_test_points(smoothed_waypoints, steps=10)
             with geom_lock:
                 _, distances_test, face_idx_test = local_pq.on_surface(test_pts)
@@ -1348,6 +1374,11 @@ def algo_worker(
                       f"plan : {crabe_diag['plan_ok']} | droit : {crabe_diag['droit_ok']} | "
                       f"éligibles : {crabe_diag['eligibles']} | rejets clash : {crabe_diag['clash_rejets']} | "
                       f"posés : {len(final_crabes)}")
+
+            # Dernier épinglage : le raffinement adaptatif a pu insérer ou
+            # retirer des points depuis le précédent, donc décaler les indices.
+            # C'est cette trajectoire-ci qui est publiée et notée.
+            snap_mandatory_points(smoothed_waypoints, mandatory_points)
 
             # ==========================================================
             # 📋 RAPPORT DE CONFORMITÉ
