@@ -437,8 +437,8 @@ aucun chemin actif.
 
 ```bash
 python -m pytest tests/ -q                       # règles, géométrie, agents
-xvfb-run -a python -m pytest tests/test_ui.py tests/test_viewer3d.py \\
-                            tests/test_charts.py    # interface, vue 3D, courbes
+# interface, vue 3D, courbes :
+xvfb-run -a python -m pytest tests/test_ui.py tests/test_viewer3d.py tests/test_charts.py
 ```
 
 Les tests d'interface s'ignorent d'eux-mêmes si tkinter, customtkinter ou un
