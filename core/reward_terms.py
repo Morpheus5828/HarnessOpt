@@ -21,6 +21,7 @@ __all__ = [
     "clearance_reward",
     "bend_reward",
     "straightness_reward",
+    "zigzag_penalty",
     "free_span_penalty",
     "fixation_coverage_reward",
     "detour_penalty",
@@ -158,6 +159,38 @@ def straightness_reward(
     values = np.where(is_straight, weight, 0.0)
     values = values + run_bonus * np.clip(run_length / max(run_scale_mm, 1e-3), 0.0, 1.0)
     return _to_full(values.astype(np.float32), n)
+
+
+def zigzag_penalty(
+    points,
+    angle_tol_deg: float = 3.0,
+    weight: float = 60.0,
+    saturation_deg: float = 45.0,
+) -> np.ndarray:
+    """Sanctionne les inversions du sens de virage.
+
+    Un zigzag n'est pas une question de courbure totale, et c'est pourquoi il
+    lui faut un terme propre. Un arc de cercle régulier accumule beaucoup de
+    courbure sans jamais osciller ; à l'inverse, une succession de petits
+    virages alternés peut totaliser peu de courbure tout en donnant un câble
+    visuellement inacceptable, et impossible à poser proprement. Ni
+    :func:`bend_reward`, qui regarde le rayon local, ni
+    :func:`straightness_reward`, qui récompense les portions droites, ne
+    distinguent ces deux cas.
+
+    La pénalité est proportionnelle à la gravité de l'inversion, saturée à
+    ``saturation_deg`` pour qu'un demi-tour isolé n'écrase pas tout le reste du
+    signal d'apprentissage.
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    n = len(pts)
+    if n < 4:
+        return np.zeros(n, dtype=np.float32)
+
+    severity = np.degrees(gm.zigzag_severity(pts, angle_tol_deg))
+    scale = max(float(saturation_deg), 1e-3)
+    penalty = -weight * np.clip(severity / scale, 0.0, 1.0)
+    return _to_full(penalty.astype(np.float32), n)
 
 
 def free_span_penalty(
