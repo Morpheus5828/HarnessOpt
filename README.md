@@ -383,7 +383,9 @@ même : aucun passage imposé. La réponse se retrouve sur l'interrupteur
 réglage de la page décide en retour de ce que la fenêtre propose à l'ouverture.
 Sans peigne dans le couloir, aucune question n'est posée.
 
-Les billes d'entrée (verte) et de sortie (rouge) et le **segment vert** qui les
+Les billes d'entrée (verte) et de sortie (rouge) reprennent la taille de
+l'ancienne application — la moitié du rayon du toron, assez petites pour ne pas
+masquer l'encoche qu'elles repèrent — et le **segment vert** qui les
 joint restent affichés pendant tout le cheminement : l'arrêt du calcul n'efface
 que les tracés des agents et les crabes posés. Ce sont les repères de ce qui
 est imposé, ils doivent rester lisibles quand la trajectoire bouge.
@@ -638,6 +640,21 @@ tests/                      419 tests hors interface, 141 tests d'interface
 `core/geometry_metrics.py`, `core/routing_rules.py`, `core/reward_terms.py` et
 `core/orchestrator.py` ne dépendent que de numpy : ils sont testables sans
 PyTorch, sans maillage et sans écran.
+
+### L'ancienne application
+
+`old_code/` contient l'application d'origine, fournie comme référence :
+`controller.py`, `fixation.py` et `fixation_detection.py`. Ce dernier est
+**identique** au détecteur du dépôt — ce qui confirme que le scan ne trouvait
+rien à cause du format de maquette qu'on lui donnait, pas à cause de lui.
+
+Deux points y ont été repris. La règle « une encoche par peigne, dans le sens
+du trajet » : elle y était déjà, avec un critère plus simple — l'encoche dont
+le centre est le plus proche du segment A–B, et un produit scalaire pour le
+sens. La programmation dynamique décrite plus haut la généralise en tenant
+compte de l'enchaînement des peignes, et se vérifie contre une énumération
+exhaustive. Et la taille des billes, `tube_radius * 0.5`, pour que le repère
+reste celui qu'on connaît.
 
 ### Fichiers hérités
 

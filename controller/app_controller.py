@@ -53,8 +53,10 @@ ASK_TIMEOUT_S = 300
 _UNSET = object()
 
 #: Rayon des billes d'entrée et de sortie, en fraction du rayon du toron. Une
-#: bille de la taille du faisceau masquerait l'encoche qu'elle repère.
-PASSAGE_MARKER_FACTOR = 0.6
+#: bille de la taille du faisceau masquerait l'encoche qu'elle repère. C'est la
+#: proportion de l'ancienne application (``tube_radius * 0.5``) : l'utilisateur
+#: reconnaît le repère qu'il connaît.
+PASSAGE_MARKER_FACTOR = 0.5
 
 #: Couleur du segment qui joint p_in à p_out sur une encoche empruntée.
 PASSAGE_SEGMENT_COLOR = "#1E9E5A"
