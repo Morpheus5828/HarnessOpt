@@ -1,5 +1,17 @@
 J'aimerais te faire remonter quelques soucis utilisateur que j'ai pu rencontrer lors de la prise en main.
-- Lors du cheminement, lorsque tu as détecter les p_in et p_out je voudrais que tu laisses le choix à l'utilisateur lorsque la pop s'ouvre pour savoir si il veux que l'appli choissient ces pts de fixation, de pouvoir choisir quel couple (p_in, p_out) veux t il choisir stp avec un system de click ou de select box. 
-Tu ajouteras donc le fait de dessiner des petites spèhres sur les p_in et p_out relier d'un segment vert. 
-Lors du cheminement je veux que tu laisses ces spheres et ces segments sur le rendu 3D stp.
-- J'ai remarqué une erreur lors du cheminement en passant par les pts de fixation p_in, p_out), parfois entre la sphère verte et rouge il a des fixations, je suis d'accord que les chemins doivent passer devant, par contre les fixations qui ne sont pas dans la zone de rooting ne doivent pas être pris en compte. Il doit s'arreter au bon endroit.
+- Quand je ferme la mini page 3D pour revenir dans l'appli, j'ai cette erreur la: 
+2026-09-01 10:28:31.203 ( 623.993s) [2A4C81E6213A3EEC]   vtkShaderProgram.cxx:438    ERR| vtkShaderProgram (00000297C907D7A0): Could not create shader object.
+WARNING:root:ERROR: In vtkShaderProgram.cxx, line 438
+vtkShaderProgram (00000297C907D7A0): Could not create shader object.
+2026-09-01 10:28:31.206 ( 623.996s) [2A4C81E6213A3EEC]vtkOpenGLVertexArrayObj:255    ERR| vtkOpenGLVertexArrayObject (000002990485DED0): attempt to add attribute without a program for attribute ndCoordIn
+WARNING:root:ERROR: In vtkOpenGLVertexArrayObject.cxx, line 255
+vtkOpenGLVertexArrayObject (000002990485DED0): attempt to add attribute without a program for attribute ndCoordIn
+2026-09-01 10:28:31.206 ( 623.997s) [2A4C81E6213A3EEC]vtkOpenGLQuadHelper.cxx:60    WARN| Error binding ndCoords to VAO.
+
+- Je voudrais ajouter une fonctionalité assez puissante pour intégrer l'humain dans la boucle je voudrais pouvoir faire en sorte dans la page 3D que l'humain click sur un point présent dans les distances par exemple et la décalle avec la souris pour faire passer le chemin ailleurs, penses tu que c'est possible de le faire ? si oui ajoute cette fonctinalité comme étant BETA.
+
+- Sur la page de Cheminement il ne doit plus y avoie la petite vue 3D, seulement la GRANDE vue 3D.
+
+- Cote routing, j'ai toujours l'erreur sur le fait que les trajectoires vont plus loins que la zone de destination.
+
+- Lorsque l'utilisateur sélectionne les fixation à utiliser ou non dans la zone de routage, cette fonctionalité la doit être dans la vue 3D, enft par default elle s'ouvre directement quand l'utilisateur appuie sur Lancement du cheminement
