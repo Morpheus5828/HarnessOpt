@@ -342,12 +342,51 @@ auparavant — le viewer savait masquer les acteurs `clamp_`, mais aucun n'étai
 jamais créé, et l'utilisateur n'avait aucun moyen de vérifier ce que le scan
 avait reconnu.
 
-Une fois le scan terminé et les passages dessinés, l'application **pose la
-question** : « faut-il faire passer le faisceau par ces fixations ? ». Elle
-arrive après l'affichage, pas avant : l'utilisateur répond en voyant ce dont on
-parle, plutôt que sur une liste de coordonnées. Sa réponse se retrouve sur
-l'interrupteur *Emprunter les fixations existantes* de la page, et y reste
-mémorisée. Sans passage détecté, aucune question n'est posée.
+#### Le couloir de cheminement
+
+Le détecteur balaie **toute** la maquette : il reconnaît aussi bien les peignes
+qui jalonnent le trajet que ceux montés à l'autre bout de l'appareil. Les
+emprunter tous obligeait le câble à aller les chercher — le trajet ne
+s'arrêtait plus là où il devait.
+
+Un peigne n'est donc retenu que s'il est dans le **couloir de cheminement** :
+l'ellipsoïde de foyers A et B, où le détour qu'il impose — `|PA| + |PB|` — ne
+dépasse pas 1,25 fois la distance directe `|AB|` (`DEFAULT_ZONE_FACTOR`). Le
+critère est relatif à la longueur du trajet, pas une distance en millimètres :
+c'est la même chose qui compte sur un cheminement de 50 cm et sur un de 5 m.
+
+Mesuré sur deux cadres alignés et un peigne reconnu dans la soute arrière
+(détour ×3,91) : trajet de 7 530 mm sans filtre, 1 841 mm avec.
+
+#### Choisir soi-même l'encoche
+
+Une fois le scan terminé et les passages dessinés, l'application ouvre une
+fenêtre : **par quelle encoche le faisceau doit-il passer ?** Une liste
+déroulante par peigne, l'encoche que le calcul retiendrait déjà sélectionnée,
+et « ne pas emprunter ce peigne » en tête de liste.
+
+Une liste déroulante plutôt qu'une case par encoche : un peigne peut en porter
+treize, et treize cases à cocher dont une seule peut être retenue est un
+formulaire qui ment sur ce qu'il autorise. La liste dit la règle par sa forme
+même — un choix, et un seul.
+
+L'application propose, l'intégrateur tranche : c'est lui qui sait quelle
+encoche est libre, laquelle est réservée à un autre faisceau, laquelle est
+atteignable à l'outil, et rien de cela n'est dans le DMU. Chaque changement se
+répercute **aussitôt sur la vue 3D** : l'encoche désignée s'allume avant même
+de valider, plutôt que d'arbitrer sur des coordonnées. La fenêtre arrive après
+l'affichage, jamais avant.
+
+Tout ignorer, fermer la fenêtre et écarter chaque peigne un à un reviennent au
+même : aucun passage imposé. La réponse se retrouve sur l'interrupteur
+*Emprunter les fixations existantes* de la page, et y reste mémorisée ; le
+réglage de la page décide en retour de ce que la fenêtre propose à l'ouverture.
+Sans peigne dans le couloir, aucune question n'est posée.
+
+Les billes d'entrée (verte) et de sortie (rouge) et le **segment vert** qui les
+joint restent affichés pendant tout le cheminement : l'arrêt du calcul n'efface
+que les tracés des agents et les crabes posés. Ce sont les repères de ce qui
+est imposé, ils doivent rester lisibles quand la trajectoire bouge.
 
 #### Une encoche par peigne, pas toutes
 
@@ -380,7 +419,9 @@ choisie, puisque ce choix vient après.
 L'encoche retenue est visible partout : marquée d'une flèche dans la liste du
 bandeau, seule à garder ses couleurs dans la vue 3D — les autres passent en
 gris fin plutôt que d'être effacées, car elles existent — et nommée en console
-avec son numéro et son sens de traversée.
+avec son numéro et son sens de traversée. Le calcul ne fait que **proposer** :
+la fenêtre décrite plus bas laisse l'utilisateur imposer une autre encoche, ou
+écarter le peigne.
 
 #### Un couple ne se disloque pas
 
@@ -591,7 +632,7 @@ ui/
   charts.py                 courbes (récompense + grandeurs physiques)
   viewer3d.py               vue 3D incrustée (fil de rendu dédié)
   widgets/  pages/          composants et écrans
-tests/                      333 tests hors interface, 131 tests d'interface
+tests/                      419 tests hors interface, 141 tests d'interface
 ```
 
 `core/geometry_metrics.py`, `core/routing_rules.py`, `core/reward_terms.py` et

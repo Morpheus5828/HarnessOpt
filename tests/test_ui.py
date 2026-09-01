@@ -939,54 +939,148 @@ class TestFenetreDeConfirmationDesFixations:
                            "score": 0.9, "routing_points": points}],
                          scanned_files=scanned)
 
-    def test_la_question_montre_le_compte_et_les_passages(self, app, monkeypatch):
-        vu = {}
+    @staticmethod
+    def _combs(scan):
+        return [list(f.passages) for f in scan.fixations if f.passages]
 
-        def faux_askyesno(title, message, **kwargs):
-            vu["titre"] = title
-            vu["message"] = message
-            return True
+    def test_la_fenetre_propose_une_liste_par_peigne(self, app):
+        from ui.widgets.fixation_picker import FixationPicker, passage_labels
 
-        monkeypatch.setattr("ui.app_window.messagebox.askyesno", faux_askyesno)
-        assert app.ask_use_fixations(self._scan(2, scanned=9)) is True
-        assert "9" in vu["message"]
-        assert "p_in" in vu["message"] and "p_out" in vu["message"]
-        assert "n° 1" in vu["message"] and "n° 2" in vu["message"]
+        scan = self._scan(3)
+        picker = FixationPicker(app, self._combs(scan), selection={"peigne.stl": 1})
+        try:
+            app.update()
+            menu = picker._menus["peigne.stl"]
+            # Le refus, puis une ligne par encoche.
+            assert len(menu.cget("values")) == 4
+            assert menu.get() == passage_labels(scan.fixations[0].passages)[2]
+        finally:
+            picker.destroy()
 
-    def test_un_refus_est_rendu_tel_quel(self, app, monkeypatch):
-        monkeypatch.setattr("ui.app_window.messagebox.askyesno",
-                            lambda *a, **k: False)
-        assert app.ask_use_fixations(self._scan(1)) is False
+    def test_chaque_encoche_est_lisible_dans_la_liste(self, app):
+        from ui.widgets.fixation_picker import passage_labels
 
-    def test_une_fenetre_en_echec_retombe_sur_le_defaut(self, app, monkeypatch):
-        def explose(*_a, **_k):
-            raise RuntimeError("pas d'affichage")
+        scan = self._scan(2)
+        labels = passage_labels(scan.fixations[0].passages)
+        assert all("p_in" in label and "p_out" in label for label in labels[1:])
+        assert "n° 1" in labels[1] and "n° 2" in labels[2]
 
-        monkeypatch.setattr("ui.app_window.messagebox.askyesno", explose)
-        assert app.ask_use_fixations(self._scan(1), default=True) is True
-        assert app.ask_use_fixations(self._scan(1), default=False) is False
+    def test_choisir_une_encoche_met_a_jour_le_choix(self, app):
+        from ui.widgets.fixation_picker import FixationPicker
+
+        scan = self._scan(3)
+        picker = FixationPicker(app, self._combs(scan), selection={"peigne.stl": 0})
+        try:
+            picker.choose("peigne.stl", 2)
+            assert picker.selection == {"peigne.stl": 2}
+        finally:
+            picker.destroy()
+
+    def test_le_choix_se_previsualise_avant_validation(self, app):
+        """L'utilisateur voit l'encoche désignée avant de valider."""
+        from ui.widgets.fixation_picker import FixationPicker
+
+        vus = []
+        scan = self._scan(3)
+        picker = FixationPicker(app, self._combs(scan), selection={"peigne.stl": 0},
+                                on_change=vus.append)
+        try:
+            picker.choose("peigne.stl", 2)
+            assert vus == [{"peigne.stl": 2}]
+        finally:
+            picker.destroy()
+
+    def test_un_apercu_en_echec_n_empeche_pas_de_repondre(self, app):
+        from ui.widgets.fixation_picker import FixationPicker
+
+        def explose(_selection):
+            raise RuntimeError("pas de vue 3D")
+
+        scan = self._scan(2)
+        picker = FixationPicker(app, self._combs(scan), on_change=explose)
+        try:
+            picker.choose("peigne.stl", 1)
+            assert picker.selection == {"peigne.stl": 1}
+        finally:
+            picker.destroy()
+
+    def test_un_peigne_peut_etre_ecarte(self, app):
+        from ui.widgets.fixation_picker import FixationPicker
+
+        scan = self._scan(3)
+        picker = FixationPicker(app, self._combs(scan), selection={"peigne.stl": 1})
+        try:
+            picker.choose("peigne.stl", None)
+            assert picker.selection == {"peigne.stl": None}
+        finally:
+            picker.destroy()
+
+    def test_tout_ignorer_ecarte_chaque_peigne(self, app):
+        from ui.widgets.fixation_picker import FixationPicker
+
+        scan = self._scan(2)
+        picker = FixationPicker(app, self._combs(scan), selection={"peigne.stl": 0})
+        picker._refuse()
+        assert picker.result == {"peigne.stl": None}
+
+    def test_la_fenetre_est_bilingue(self, app):
+        from ui.widgets.fixation_picker import NO_CROSSING_EN, passage_labels
+
+        scan = self._scan(2)
+        assert passage_labels(scan.fixations[0].passages, "EN")[0] == NO_CROSSING_EN
+        assert "no. 1" in passage_labels(scan.fixations[0].passages, "EN")[1]
 
     def test_la_question_n_est_pas_posee_sans_passage(self, app, monkeypatch):
         """Interrompre l'utilisateur pour rien serait gratuit."""
         from core.fixation_scan import ScanResult
 
         appels = []
-        monkeypatch.setattr("ui.app_window.messagebox.askyesno",
-                            lambda *a, **k: appels.append(1) or True)
-        assert app.controller._ask_use_fixations(ScanResult(), default=False) is False
-        assert app.controller._ask_use_fixations(None, default=True) is True
+        monkeypatch.setattr(app, "ask_fixation_choice",
+                            lambda *a, **k: appels.append(1) or {})
+        app.controller.scan_result = ScanResult()
+        assert app.controller._ask_fixation_choice(ScanResult(), {}) is None
+        assert app.controller._ask_fixation_choice(None, {}) is None
         assert appels == []
 
+    def test_sans_peigne_utilisable_la_fenetre_ne_s_ouvre_pas(self, app):
+        assert app.ask_fixation_choice([]) is None
+
     def test_la_reponse_est_reportee_sur_la_page(self, app, monkeypatch):
-        monkeypatch.setattr("ui.app_window.messagebox.askyesno",
-                            lambda *a, **k: False)
+        import numpy as np
+
+        monkeypatch.setattr(app, "ask_fixation_choice", lambda *a, **k: None)
+        controller = app.controller
+        controller.point_a = np.array([-500.0, 0.0, 0.0], dtype=np.float32)
+        controller.point_b = np.array([500.0, 0.0, 0.0], dtype=np.float32)
+        controller.scan_result = self._scan(1)
+
         page = app.pages[2]
         page.f_use_fixations.var.set(True)
         try:
-            reponse = app.controller._ask_use_fixations(self._scan(1), default=True)
+            reponse = controller._ask_fixation_choice(controller.scan_result, {})
             app.update()
-            assert reponse is False
+            assert reponse is None
             assert page.f_use_fixations.get() is False
+        finally:
+            page.f_use_fixations.var.set(True)
+
+    def test_un_choix_valide_est_reporte_sur_la_page(self, app, monkeypatch):
+        import numpy as np
+
+        monkeypatch.setattr(app, "ask_fixation_choice",
+                            lambda *a, **k: {"peigne.stl": 0})
+        controller = app.controller
+        controller.point_a = np.array([-500.0, 0.0, 0.0], dtype=np.float32)
+        controller.point_b = np.array([500.0, 0.0, 0.0], dtype=np.float32)
+        controller.scan_result = self._scan(2)
+
+        page = app.pages[2]
+        page.f_use_fixations.var.set(False)
+        try:
+            assert controller._ask_fixation_choice(controller.scan_result, {}) \
+                == {"peigne.stl": 0}
+            app.update()
+            assert page.f_use_fixations.get() is True
         finally:
             page.f_use_fixations.var.set(True)
 

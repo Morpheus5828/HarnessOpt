@@ -13,7 +13,17 @@ import numpy as np
 import pytest
 
 from core.fixation_scan import Passage
-from core.passage_route import Crossing, choose_crossings, comb_center, describe
+from core.passage_route import (
+    DEFAULT_ZONE_FACTOR,
+    Crossing,
+    choose_crossings,
+    comb_center,
+    default_selection,
+    describe,
+    detour_ratio,
+    filter_combs,
+    in_routing_zone,
+)
 
 
 def peigne(name, x, n=3, pas=50.0, epaisseur=20.0):
@@ -41,7 +51,7 @@ def longueur(start, goal, crossings):
 
 def test_un_peigne_ne_donne_qu_une_traversee():
     """Les autres encoches sont celles des faisceaux voisins."""
-    crossings = choose_crossings((0, 0, 0), (200, 0, 0), [peigne("A", 100.0, n=5)])
+    crossings = choose_crossings((0, 0, 0), (2000, 0, 0), [peigne("A", 1000.0, n=5)])
     assert len(crossings) == 1
 
 
@@ -64,13 +74,13 @@ def test_le_cable_ne_fait_plus_la_navette_sur_un_meme_peigne():
 
 def test_l_encoche_retenue_est_celle_qui_sert_le_trajet():
     """Le trajet longe y = 0 : c'est l'encoche du bas qu'il faut prendre."""
-    crossings = choose_crossings((0, 0, 0), (200, 0, 0), [peigne("A", 100.0, n=5)])
+    crossings = choose_crossings((0, 0, 0), (2000, 0, 0), [peigne("A", 1000.0, n=5)])
     assert crossings[0].passage.index == 0
 
 
 def test_un_trajet_decale_change_l_encoche_retenue():
     """Le choix suit le trajet, il n'est pas figé sur la première encoche."""
-    crossings = choose_crossings((0, 200, 0), (200, 200, 0), [peigne("A", 100.0, n=5)])
+    crossings = choose_crossings((0, 200, 0), (2000, 200, 0), [peigne("A", 1000.0, n=5)])
     assert crossings[0].passage.index == 4
 
 
@@ -206,3 +216,136 @@ def test_les_points_sortent_dans_l_ordre_de_la_marche():
                                  [[Passage(index=0, p_in=(100.0, 0.0, 0.0),
                                            p_out=(100.0, 0.0, 20.0), comb="A")]])
     assert crossings[0].points == [[100.0, 0.0, 20.0], [100.0, 0.0, 0.0]]
+
+
+# ----------------------------------------------------------------------
+# Le couloir de cheminement
+# ----------------------------------------------------------------------
+
+def test_un_point_sur_le_segment_ne_coute_aucun_detour():
+    assert detour_ratio((0, 0, 0), (1000, 0, 0), (500, 0, 0)) == pytest.approx(1.0)
+
+
+def test_le_detour_croit_avec_l_ecart():
+    proche = detour_ratio((0, 0, 0), (1000, 0, 0), (500, 100, 0))
+    loin = detour_ratio((0, 0, 0), (1000, 0, 0), (500, 400, 0))
+    assert 1.0 < proche < loin
+
+
+def peigne_lointain(name="ailleurs", ecart=6000.0):
+    """Un peigne reconnu ailleurs dans la maquette, loin du cheminement."""
+    return [Passage(index=i, p_in=(1000.0, ecart + i * 50.0, 0.0),
+                    p_out=(1000.0, ecart + i * 50.0, 20.0), comb=name)
+            for i in range(3)]
+
+
+def test_un_peigne_a_l_autre_bout_de_la_maquette_est_ecarte():
+    """Le détecteur balaie tout le DMU, pas seulement la zone de cheminement."""
+    combs = [peigne("sur_le_trajet", 1000.0), peigne_lointain()]
+    kept = filter_combs((0, 0, 0), (2000, 0, 0), combs)
+    assert len(kept) == 1
+    assert kept[0][0].comb == "sur_le_trajet"
+
+
+def test_un_peigne_hors_zone_n_est_pas_emprunte():
+    """Sinon le câble va le chercher et ne s'arrête plus au bon endroit."""
+    loin = [Passage(index=0, p_in=(1000.0, 9000.0, 0.0),
+                    p_out=(1000.0, 9000.0, 20.0), comb="loin")]
+    crossings = choose_crossings((0, 0, 0), (2000, 0, 0),
+                                 [peigne("proche", 1000.0), loin])
+    assert [c.comb for c in crossings] == ["proche"]
+
+
+def test_le_couloir_peut_etre_desactive():
+    loin = [Passage(index=0, p_in=(1000.0, 9000.0, 0.0),
+                    p_out=(1000.0, 9000.0, 20.0), comb="loin")]
+    crossings = choose_crossings((0, 0, 0), (2000, 0, 0), [loin], zone_factor=0)
+    assert len(crossings) == 1
+
+
+def test_un_depart_confondu_avec_l_arrivee_n_ecarte_rien():
+    """Le couloir n'a alors aucun sens : prétendre le contraire viderait tout."""
+    assert detour_ratio((0, 0, 0), (0, 0, 0), (5000, 0, 0)) == 0.0
+    assert in_routing_zone((0, 0, 0), (0, 0, 0), (5000, 0, 0))
+
+
+def test_la_largeur_du_couloir_est_celle_annoncee():
+    """Le facteur est un rallongement relatif, pas une distance."""
+    limite = (1000.0, 0.0, 0.0)
+    assert in_routing_zone((0, 0, 0), (2000, 0, 0), limite, factor=1.0)
+    # Un point qui rallonge le trajet de 30 % sort d'un couloir à 1,25.
+    ecart = 2000.0 * 0.5 * (DEFAULT_ZONE_FACTOR ** 2 - 1) ** 0.5
+    assert in_routing_zone((0, 0, 0), (2000, 0, 0), (1000.0, ecart * 0.98, 0.0))
+    assert not in_routing_zone((0, 0, 0), (2000, 0, 0), (1000.0, ecart * 1.02, 0.0))
+
+
+# ----------------------------------------------------------------------
+# Le choix de l'utilisateur
+# ----------------------------------------------------------------------
+
+def test_l_utilisateur_impose_son_encoche():
+    combs = [peigne("A", 1000.0, n=5)]
+    crossings = choose_crossings((0, 0, 0), (2000, 0, 0), combs, selection={"A": 3})
+    assert crossings[0].passage.index == 3
+
+
+def test_le_sens_reste_calcule_sur_une_encoche_imposee():
+    """Il n'a aucune conséquence physique : l'utilisateur n'a pas à s'en occuper."""
+    passage = Passage(index=0, p_in=(1000.0, 0.0, 0.0), p_out=(1000.0, 0.0, 100.0),
+                      comb="A")
+    haut = choose_crossings((0, 0, 0), (2000, 0, 500), [[passage]], selection={"A": 0})
+    bas = choose_crossings((0, 0, 0), (2000, 0, -500), [[passage]], selection={"A": 0})
+    assert haut[0].exit == passage.p_out
+    assert bas[0].exit == passage.p_in
+
+
+def test_un_peigne_refuse_par_l_utilisateur_est_ignore():
+    combs = [peigne("A", 700.0), peigne("B", 1300.0)]
+    crossings = choose_crossings((0, 0, 0), (2000, 0, 0), combs, selection={"A": None})
+    assert [c.comb for c in crossings] == ["B"]
+
+
+def test_un_peigne_absent_du_choix_reste_calcule():
+    combs = [peigne("A", 700.0), peigne("B", 1300.0)]
+    crossings = choose_crossings((0, 0, 0), (2000, 0, 0), combs, selection={"A": 2})
+    assert [c.comb for c in crossings] == ["A", "B"]
+    assert crossings[0].passage.index == 2
+
+
+def test_tout_refuser_ne_laisse_aucune_traversee():
+    combs = [peigne("A", 700.0), peigne("B", 1300.0)]
+    assert choose_crossings((0, 0, 0), (2000, 0, 0), combs,
+                            selection={"A": None, "B": None}) == []
+
+
+def test_une_encoche_inconnue_retombe_sur_le_calcul():
+    """Un choix périmé ne doit pas faire disparaître le peigne en silence."""
+    combs = [peigne("A", 1000.0, n=3)]
+    crossings = choose_crossings((0, 0, 0), (2000, 0, 0), combs, selection={"A": 99})
+    assert len(crossings) == 1
+
+
+def test_le_choix_propose_est_celui_que_l_application_retiendrait():
+    combs = [peigne("A", 700.0, n=4), peigne("B", 1300.0, n=4)]
+    crossings = choose_crossings((0, 0, 0), (2000, 0, 0), combs)
+    propose = default_selection(combs, crossings)
+    assert set(propose) == {"A", "B"}
+    assert propose == {c.comb: c.passage.index for c in crossings}
+
+
+def test_le_choix_propose_se_rejoue_a_l_identique():
+    """Ce qui est proposé doit être exactement ce qu'on peut modifier."""
+    combs = [peigne("A", 700.0, n=4), peigne("B", 1300.0, n=4)]
+    crossings = choose_crossings((0, 0, 0), (2000, 0, 0), combs)
+    rejoue = choose_crossings((0, 0, 0), (2000, 0, 0), combs,
+                              selection=default_selection(combs, crossings))
+    assert [(c.comb, c.passage.index) for c in rejoue] \
+        == [(c.comb, c.passage.index) for c in crossings]
+
+
+def test_un_peigne_hors_zone_n_est_pas_proposable():
+    loin = [Passage(index=0, p_in=(1000.0, 9000.0, 0.0),
+                    p_out=(1000.0, 9000.0, 20.0), comb="loin")]
+    combs = filter_combs((0, 0, 0), (2000, 0, 0), [peigne("proche", 1000.0), loin])
+    assert set(default_selection(combs, choose_crossings((0, 0, 0), (2000, 0, 0), combs))) \
+        == {"proche"}

@@ -429,3 +429,34 @@ def test_les_encoches_laissees_restent_visibles(stl_path):
     creneaux = [name for name in controller.viewer.actors
                 if name.startswith("fixation_slot_")]
     assert len(creneaux) == 3
+
+
+def test_les_fixations_survivent_a_la_fin_du_cheminement(stl_path):
+    """Elles doivent rester à l'écran : c'est le repère de ce qui est imposé."""
+    controller = _controleur(stl_path)
+    controller._draw_fixations(scan_peigne(2))
+    controller.viewer.actors["traj_TD3"] = "tracé"
+    controller.viewer.actors["clamp_0"] = "crabe"
+
+    # Ce que fait l'arrêt du cheminement : il efface les tracés et les crabes.
+    controller.viewer.remove_prefix("traj_")
+    controller.viewer.remove_prefix("clamp_")
+
+    restants = [name for name in controller.viewer.actors
+                if name.startswith("fixation_")]
+    assert restants, "les billes et les segments restent sur la vue 3D"
+    assert not [name for name in controller.viewer.actors
+                if name.startswith(("traj_", "clamp_"))]
+
+
+def test_le_segment_d_une_encoche_empruntee_est_vert(stl_path):
+    from controller.app_controller import PASSAGE_SEGMENT_COLOR
+
+    assert PASSAGE_SEGMENT_COLOR.upper() == "#1E9E5A"
+
+
+def test_les_billes_sont_plus_petites_que_le_toron(stl_path):
+    """Une bille de la taille du faisceau masquerait l'encoche qu'elle repère."""
+    from controller.app_controller import PASSAGE_MARKER_FACTOR
+
+    assert 0.0 < PASSAGE_MARKER_FACTOR < 1.0
