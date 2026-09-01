@@ -19,7 +19,13 @@ from __future__ import annotations
 
 import customtkinter as ctk
 
-from core.orchestrator import ROLES, TEAM_PRESETS, ExplorationPolicy, Phase
+from core.orchestrator import (
+    EXPLORATION_MODES,
+    ROLES,
+    TEAM_PRESETS,
+    ExplorationPolicy,
+    Phase,
+)
 from core.path_planner import STRATEGIES
 from ui.theme import FONT, SPACE, current
 from ui.widgets import (
@@ -178,7 +184,25 @@ class RoutingPage(ctk.CTkFrame):
             value_formatter=self._format_temperature,
             on_change=self._on_temperature_changed,
         )
-        self.f_explore.pack(fill="x")
+        self.f_explore.pack(fill="x", pady=(0, SPACE.SM))
+
+        # Trois repères sur le curseur. Un réglage continu sans butée nommée
+        # ne se compare pas : pour juger de l'effet de l'exploration, il faut
+        # pouvoir relancer deux fois exactement au même endroit.
+        modes = ctk.CTkFrame(self.card_strategy.body, fg_color="transparent")
+        modes.pack(fill="x")
+        self.btn_modes: dict[str, ctk.CTkButton] = {}
+        for key, temperature in EXPLORATION_MODES.items():
+            button = ctk.CTkButton(
+                modes, text=t(f"routing.explore.{key}"), height=28,
+                font=FONT.SMALL_BOLD, fg_color="transparent", border_width=1,
+                border_color=theme.BORDER, text_color=theme.TEXT,
+                hover_color=theme.SURFACE_ALT,
+                command=lambda value=temperature: self._on_mode_chosen(value),
+            )
+            button.pack(side="left", fill="x", expand=True,
+                        padx=(0, SPACE.XS) if key != "exploit" else 0)
+            self.btn_modes[key] = button
 
         # --- commandes ---------------------------------------------------
         controls = ctk.CTkFrame(left, fg_color="transparent")
@@ -435,6 +459,10 @@ class RoutingPage(ctk.CTkFrame):
     def _format_temperature(self, value: float) -> str:
         return ExplorationPolicy(value).label(self.app.t.lang)
 
+    def _refresh_mode_labels(self):
+        for key, button in getattr(self, "btn_modes", {}).items():
+            button.configure(text=self.t(f"routing.explore.{key}"))
+
     def _start_path_options(self):
         key = "label_en" if self.app.t.is_english else "label_fr"
         options = [(name, spec[key]) for name, spec in STRATEGIES.items()]
@@ -465,6 +493,11 @@ class RoutingPage(ctk.CTkFrame):
     def _on_temperature_changed(self, value: float):
         self.app.remember(temperature=value)
         self.app.controller.set_temperature(value)
+
+    def _on_mode_chosen(self, temperature: float):
+        """Pose le curseur sur un repère nommé, et applique le réglage."""
+        self.f_explore.set(float(temperature))
+        self._on_temperature_changed(float(temperature))
 
     def _on_play(self):
         self.app.controller.toggle_routing()

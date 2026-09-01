@@ -26,9 +26,14 @@ from core.routing_rules import (
 # Le catalogue
 # ----------------------------------------------------------------------
 
-def test_le_catalogue_couvre_les_huit_regles():
-    assert len(RULE_CATALOG) == 8
+def test_le_catalogue_et_les_identifiants_ne_divergent_pas():
+    """C'est la seule liste qui fasse foi : une règle cochable est appliquée."""
     assert set(RULE_IDS) == set(ALL_RULES)
+    assert len(RULE_IDS) == len(RULE_CATALOG)
+
+
+def test_chaque_regle_du_catalogue_est_unique():
+    assert len({info.rule_id for info in RULE_CATALOG}) == len(RULE_CATALOG)
 
 
 def test_chaque_regle_est_documentee_dans_les_deux_langues():

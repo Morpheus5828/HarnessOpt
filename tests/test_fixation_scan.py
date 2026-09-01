@@ -366,3 +366,122 @@ def test_le_vtk_de_la_fusion_n_est_pas_lisible_par_le_detecteur():
     from core import paths
 
     assert not str(paths.FUSED_MESH_PATH).lower().endswith(fs.DETECTOR_SUFFIXES)
+
+
+# ----------------------------------------------------------------------
+# Les encoches, cherchées dans la matière
+# ----------------------------------------------------------------------
+
+def peigne_stl(tmp_path, n_dents=10, nom="XA453420_peigne.stl"):
+    """Un peigne : une embase longue selon x, des dents selon z, des vides entre."""
+    trimesh = pytest.importorskip("trimesh")
+
+    parts = [trimesh.creation.box(extents=(200.0, 20.0, 6.0))]
+    for i in range(n_dents):
+        dent = trimesh.creation.box(extents=(9.0, 20.0, 30.0))
+        dent.apply_translation((-90.0 + i * 20.0, 0.0, 18.0))
+        parts.append(dent)
+    mesh = trimesh.util.concatenate(parts)
+    chemin = str(tmp_path / nom)
+    mesh.export(chemin)
+    return chemin, mesh
+
+
+def directions(clamp):
+    import numpy as np
+
+    points = np.asarray(clamp["routing_points"], dtype=float)
+    vecteurs = points[1::2] - points[0::2]
+    return vecteurs / np.linalg.norm(vecteurs, axis=1)[:, None]
+
+
+def brut_du_detecteur(chemin, n=13):
+    """Ce que rend le détecteur : des tranches d'encombrement, pas des encoches."""
+    import numpy as np
+
+    identite = np.eye(4).tolist()
+    points = [[float(i * 10), 0.0, 0.0] for i in range(2 * n)]
+    return {"name": "XA453420_peigne.stl", "position": [0.0, 0.0, 0.0], "score": 0.9,
+            "routing_points": points, "file_path": chemin, "transform": identite}
+
+
+def test_les_encoches_sont_cherchees_dans_la_matiere(tmp_path):
+    chemin, _ = peigne_stl(tmp_path)
+    clamp = brut_du_detecteur(chemin)
+    assert fs.refine_passages([clamp], log=lambda *_a: None) == 1
+    assert len(clamp["routing_points"]) > 0
+
+
+def test_les_segments_sont_paralleles_entre_eux(tmp_path):
+    """Chaque encoche se traverse dans le même sens : celui des dents."""
+    import numpy as np
+
+    chemin, _ = peigne_stl(tmp_path)
+    clamp = brut_du_detecteur(chemin)
+    fs.refine_passages([clamp], log=lambda *_a: None)
+    dirs = directions(clamp)
+    assert np.allclose(np.abs(dirs @ dirs[0]), 1.0, atol=1e-6)
+
+
+def test_les_segments_suivent_les_dents_et_non_l_epaisseur(tmp_path):
+    """Le défaut : le détecteur traverse le peigne dans sa plus petite dimension.
+
+    Les dents pointent selon z ; l'encombrement du peigne est le plus mince
+    selon y. Un segment selon y est donc perpendiculaire au passage réel.
+    """
+    import numpy as np
+
+    chemin, _ = peigne_stl(tmp_path)
+    clamp = brut_du_detecteur(chemin)
+    fs.refine_passages([clamp], log=lambda *_a: None)
+    dirs = directions(clamp)
+    assert abs(float(dirs[0] @ np.array([0.0, 0.0, 1.0]))) > 0.99, "parallèle aux dents"
+    assert abs(float(dirs[0] @ np.array([0.0, 1.0, 0.0]))) < 0.01, "pas l'épaisseur"
+
+
+def test_le_recalage_est_appliqué_aux_segments(tmp_path):
+    """Les points doivent atterrir là où l'ICP a trouvé le peigne."""
+    import numpy as np
+
+    chemin, _ = peigne_stl(tmp_path)
+    clamp = brut_du_detecteur(chemin)
+    matrice = np.eye(4)
+    matrice[:3, 3] = [1000.0, 0.0, 0.0]
+    clamp["transform"] = matrice.tolist()
+    fs.refine_passages([clamp], log=lambda *_a: None)
+    points = np.asarray(clamp["routing_points"], dtype=float)
+    assert points[:, 0].min() > 850.0
+
+
+def test_le_nombre_d_encoches_vient_de_la_piece(tmp_path):
+    """Et non d'un paramètre codé en dur dans le détecteur."""
+    peu, _ = peigne_stl(tmp_path, n_dents=4, nom="peu.stl")
+    beaucoup, _ = peigne_stl(tmp_path, n_dents=10, nom="beaucoup.stl")
+    a, b = brut_du_detecteur(peu), brut_du_detecteur(beaucoup)
+    fs.refine_passages([a, b], log=lambda *_a: None)
+    assert len(a["routing_points"]) != len(b["routing_points"])
+
+
+def test_une_fixation_sans_passage_n_est_pas_touchee(tmp_path):
+    """Un clip n'a pas d'encoche : rien à y chercher."""
+    chemin, _ = peigne_stl(tmp_path)
+    clip = {"name": "clip.stl", "position": [0, 0, 0], "score": 0.8,
+            "file_path": chemin, "transform": [[1, 0, 0, 0], [0, 1, 0, 0],
+                                               [0, 0, 1, 0], [0, 0, 0, 1]]}
+    assert fs.refine_passages([clip], log=lambda *_a: None) == 0
+    assert "routing_points" not in clip
+
+
+def test_un_modele_illisible_garde_les_points_du_detecteur(tmp_path):
+    """Approximatifs vaut mieux qu'absents."""
+    clamp = brut_du_detecteur(str(tmp_path / "jamais_ecrit.stl"))
+    avant = list(clamp["routing_points"])
+    lignes = []
+    assert fs.refine_passages([clamp], log=lignes.append) == 0
+    assert clamp["routing_points"] == avant
+    assert any("non recalculées" in ligne for ligne in lignes)
+
+
+def test_une_liste_vide_ne_leve_pas():
+    assert fs.refine_passages([], log=lambda *_a: None) == 0
+    assert fs.refine_passages(None, log=lambda *_a: None) == 0

@@ -26,6 +26,7 @@ __all__ = [
     "fixation_coverage_reward",
     "detour_penalty",
     "zone_penalty",
+    "edge_clearance_penalty",
     "combine",
 ]
 
@@ -288,6 +289,32 @@ def detour_penalty(
         return np.zeros(n, dtype=np.float32)
 
     return np.full(n, -weight * min(ratio - 1.0, 3.0), dtype=np.float32)
+
+
+def edge_clearance_penalty(
+    distances,
+    min_mm: float = 25.0,
+    weight: float = 70.0,
+) -> np.ndarray:
+    """Sanctionne un tracé qui longe un bord libre de la structure.
+
+    Un bord libre est une arête portée par une seule face : le chant de la
+    tôle. Un faisceau qui le longe frotte sur une arête vive, et surtout ne
+    peut y être tenu — il n'y a plus de matière pour recevoir une fixation.
+    Rien ne l'en écartait : la distance à la structure est *satisfaite* le
+    long d'un bord, puisque la matière est bien là, juste à côté.
+
+    ``distances`` est la distance de chaque point au bord libre le plus proche,
+    telle que la rend :func:`core.geometry_metrics.edge_distances` — ``inf``
+    sur une pièce fermée, qui n'impose alors aucune contrainte.
+    """
+    d = np.asarray(distances, dtype=np.float64)
+    if len(d) == 0 or min_mm <= 0:
+        return np.zeros(len(d), dtype=np.float32)
+
+    manque = np.clip(1.0 - d / float(min_mm), 0.0, 1.0)
+    manque = np.where(np.isfinite(d), manque, 0.0)
+    return (-float(weight) * manque).astype(np.float32)
 
 
 def zone_penalty(

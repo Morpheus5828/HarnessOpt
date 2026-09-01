@@ -1159,3 +1159,66 @@ class TestVue3DUnique:
         right = app.pages[2].tabs.master
         assert right.grid_rowconfigure(4)["weight"] > 0
         assert right.grid_rowconfigure(3)["weight"] == 0
+
+
+class TestModesDExploration:
+    """Trois repères nommés sur le curseur exploration / exploitation."""
+
+    def test_les_trois_modes_sont_proposes(self, app):
+        from core.orchestrator import EXPLORATION_MODES
+
+        assert set(app.pages[2].btn_modes) == set(EXPLORATION_MODES)
+
+    def test_les_modes_couvrent_les_deux_extremes_et_le_milieu(self):
+        from core.orchestrator import EXPLORATION_MODES
+
+        assert min(EXPLORATION_MODES.values()) == 0.0
+        assert max(EXPLORATION_MODES.values()) == 1.0
+        assert sorted(EXPLORATION_MODES.values())[1] == 0.5
+
+    def test_choisir_un_mode_pose_le_curseur(self, app, monkeypatch):
+        """Un réglage continu sans butée nommée ne se compare pas."""
+        page = app.pages[2]
+        depart = page.f_explore.get()
+        monkeypatch.setattr(app.controller, "set_temperature", lambda _v: None)
+        try:
+            page._on_mode_chosen(1.0)
+            assert page.f_explore.get() == pytest.approx(1.0)
+            page._on_mode_chosen(0.0)
+            assert page.f_explore.get() == pytest.approx(0.0)
+        finally:
+            page.f_explore.set(depart)
+
+    def test_choisir_un_mode_applique_le_reglage(self, app, monkeypatch):
+        vus = []
+        page = app.pages[2]
+        depart = page.f_explore.get()
+        monkeypatch.setattr(app.controller, "set_temperature", vus.append)
+        try:
+            page._on_mode_chosen(0.5)
+            assert vus == [0.5]
+        finally:
+            page.f_explore.set(depart)
+
+    def test_les_modes_sont_lisibles_dans_les_deux_langues(self, app):
+        from ui.i18n import EN, FR
+
+        for key in ("explore", "balanced", "exploit"):
+            assert FR[f"routing.explore.{key}"].strip()
+            assert EN[f"routing.explore.{key}"].strip()
+
+
+class TestRegleDuBordDeTole:
+    """La distance au bord de tôle est réglable comme les autres."""
+
+    def test_le_champ_existe_et_a_une_valeur(self, app):
+        assert app.pages[1].f_edge.get(0.0) > 0.0
+
+    def test_la_valeur_est_collectee(self, app):
+        assert "edge_clearance" in app.pages[1].collect()
+
+    def test_la_regle_apparait_dans_la_liste_a_cocher(self, app):
+        from core.routing_rules import RULE_IDS
+
+        assert "edge_clearance" in RULE_IDS
+        assert "edge_clearance" in app.pages[1].collect()["enabled_rules"]

@@ -23,6 +23,7 @@ from core.agent.agent import *
 from core.agent.buffer import *
 from core.agent.tool import *
 
+from core import geometry_metrics as gm
 from core import reward_terms as rwt
 from core.orchestrator import ROLES, BASE_WEIGHTS
 from core.passage_route import DEFAULT_ZONE_FACTOR
@@ -87,6 +88,32 @@ except ImportError:
     print(f"⚙️ {_N_AGENTS} agents détectés sur {_CPU_COUNT} coeurs CPU, mais 'threadpoolctl' n'est pas "
           f"installé -> les threads BLAS/OMP restent au plancher de sécurité (1). "
           f"`pip install threadpoolctl` pour exploiter jusqu'à {THREADS_PER_AGENT} thread(s)/agent.")
+
+
+#: Points de bord libre par maillage, calculés une fois. Cinq agents partagent
+#: la même maquette : rééchantillonner ses arêtes pour chacun serait cinq fois
+#: le même travail, sur des dizaines de milliers de faces.
+_BOUNDARY_CACHE: dict = {}
+
+
+def _shared_boundary(mesh, lock):
+    """Points de bord libre de la maquette, calculés une seule fois."""
+    if mesh is None:
+        return None
+    key = id(mesh)
+    cached = _BOUNDARY_CACHE.get(key)
+    if cached is not None:
+        return cached
+    guard = lock if lock is not None else threading.Lock()
+    with guard:
+        cached = _BOUNDARY_CACHE.get(key)
+        if cached is None:
+            try:
+                cached = gm.boundary_points(mesh)
+            except Exception:
+                cached = np.zeros((0, 3), dtype=np.float64)
+            _BOUNDARY_CACHE[key] = cached
+    return cached
 
 
 def algo_worker(
@@ -192,8 +219,17 @@ def algo_worker(
             )
             zone_factor = float(cfg.get("zone_factor", DEFAULT_ZONE_FACTOR))
             zone_weight = float(cfg.get("zone_weight", 90.0))
+            # Bords libres : le chant de la tôle. La distance à la structure
+            # est satisfaite le long d'un bord — la matière est bien là, juste
+            # à côté — donc rien n'en écartait le câble jusqu'ici.
+            edge_min = float(cfg.get("edge_clearance_mm", 25.0))
+            edge_weight = float(cfg.get("edge_clearance_weight", 70.0))
             exploration_noise = cfg["exploration_noise_start"]
             local_pts = int(cfg["initial_points"])
+
+        # Les bords libres ne bougent pas : on les échantillonne une fois pour
+        # toute la maquette, et les cinq agents s'en partagent le résultat.
+        edge_boundary = _shared_boundary(mesh, geom_lock)
 
         if spec is not None:
             exploration_noise = float(getattr(spec, "noise_start", exploration_noise))
@@ -826,6 +862,14 @@ def algo_worker(
                     weight=detour_weight, tolerance=detour_tolerance,
                 )[danger_indices]
 
+                if edge_boundary is not None and len(edge_boundary):
+                    R_edge = rwt.edge_clearance_penalty(
+                        gm.edge_distances(candidate_full, edge_boundary),
+                        min_mm=edge_min, weight=edge_weight,
+                    )[danger_indices]
+                else:
+                    R_edge = np.zeros(len(danger_indices), dtype=np.float32)
+
                 # Couloir de cheminement : sans ce terme, rien ne retient un
                 # point au-delà de l'arrivée. Le détour, lui, ne juge que la
                 # longueur totale et dilue sa sanction sur tous les points.
@@ -855,6 +899,7 @@ def algo_worker(
                 w_span = role_weights.get("free_span", 1.0) * rule_scale.get("free_span", 1.0)
                 w_fix = role_weights.get("fixation", 1.0) * rule_scale.get("fixation", 1.0)
                 w_length = role_weights.get("length", 1.0)
+                w_edge = rule_scale.get("edge", 1.0)
 
                 rewards_batch = (
                     w_clearance * R_margin
@@ -873,6 +918,7 @@ def algo_worker(
                     + w_fix * R_fixation
                     + w_length * R_detour
                     + R_zone
+                    + w_edge * R_edge
                 )
 
                 r_det = {
@@ -892,6 +938,7 @@ def algo_worker(
                     "Fixation": float((w_fix * R_fixation).mean()),
                     "Detour": float((w_length * R_detour).mean()),
                     "Zone": float(R_zone.mean()),
+                    "Bord": float((w_edge * R_edge).mean()),
                 }
                 local_reward = sum(r_det.values())
 
@@ -1458,6 +1505,11 @@ def algo_worker(
                         n_crossings=n_crossings,
                         clamp_arc_positions=[c.get("arc_mm", 0.0) for c in final_crabes],
                         clamp_tilt_deg=[c.get("tilt_deg", 0.0) for c in final_crabes],
+                        edge_distances=(
+                            gm.edge_distances(smoothed_waypoints, edge_boundary)
+                            if edge_boundary is not None and len(edge_boundary)
+                            else None
+                        ),
                     )
             except Exception as exc:
                 # Un rapport indisponible ne doit jamais interrompre

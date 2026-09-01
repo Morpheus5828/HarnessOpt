@@ -118,6 +118,42 @@ néglige par ailleurs le lissage, et le terme ne dépend d'aucune case à cocher
 Mesuré sur 165 itérations, il fait passer l'éclaireur de 417° à 202°
 d'oscillation cumulée, et le contrôleur d'écarts de 317° à 246°.
 
+### Le bord de tôle
+
+Rien n'empêchait le tracé de longer un chant, et pour une raison précise : la
+distance à la structure y est **satisfaite**, puisque la matière est bien là,
+juste à côté. Le câble rasait donc un bord sans enfreindre aucune règle.
+
+Un bord libre est une arête portée par une seule face — le chant de la tôle,
+contour extérieur comme découpe intérieure. Un faisceau qui le longe use sa
+gaine, et surtout ne peut y être tenu : il n'y a plus de matière pour recevoir
+une fixation. Router le long d'un bord, c'est router là où rien ne tiendra le
+faisceau.
+
+La contrainte agit à deux endroits, et c'est délibéré :
+
+* **dans le graphe du chemin de départ.** Les sommets trop proches d'un bord
+  en sont retirés. Le plus court chemin le long d'une tôle passe volontiers
+  par son chant — c'est là que la surface est la plus « directe » — et un
+  tracé qui part le long d'un bord y reste ;
+* **dans la récompense**, point par point, pour les agents.
+
+Mesuré sur un panneau percé d'une ouverture, trajet d'un angle à l'autre :
+
+| écart demandé | écart obtenu | distance au chant | longueur |
+|---|---|---|---|
+| aucun | — | 2 mm | 1 969 mm |
+| 60 mm | 60 mm | 71 mm | 2 028 mm |
+| 120 mm | **60 mm** | 71 mm | 2 028 mm |
+| 5 000 mm | **aucun** | 2 mm | 1 969 mm |
+
+Les deux dernières lignes sont le point important. Entre le contour d'un
+panneau et sa découpe, la bande utile est parfois plus étroite que deux fois
+l'écart demandé : la contrainte couperait alors la seule voie possible. Elle
+est donc **relâchée par moitiés jusqu'à ce qu'un chemin existe**, et l'écart
+réellement obtenu est annoncé dans le bandeau. Une contrainte levée faute de
+place ne se lit jamais comme une contrainte tenue.
+
 ### Le rayon de cintrage
 
 Le lissage était auparavant jugé sur le cosinus de l'angle entre deux segments
@@ -433,6 +469,20 @@ finiraient par diverger.
 
 #### Choisir soi-même l'encoche
 
+#### Toutes les fixations, pas seulement les peignes
+
+Une fixation sans encoche — un clip, un crabe déjà monté — était **purement
+ignorée**, faute d'encoche à choisir. Elle n'impose pourtant pas moins un point
+de passage qu'un peigne, et le tracé coupait donc au plus court en laissant de
+côté une ligne de fixations parfaitement utilisable.
+
+Elles deviennent des étapes du trajet, fusionnées avec les traversées de
+peigne et ordonnées le long de A→B. Un peigne apporte un couple entrée/sortie
+et un tronçon droit ; un clip apporte **un point**, sans rien à franchir. Les
+deux sont ensuite épinglés par le même mécanisme, celui qui sert déjà à
+l'édition manuelle : l'agent n'a pas à savoir d'où vient une contrainte pour
+la respecter.
+
 Une fois le scan terminé et les passages dessinés, l'application ouvre une
 fenêtre : **par quelle encoche le faisceau doit-il passer ?** Une liste
 déroulante par peigne, l'encoche que le calcul retiendrait déjà sélectionnée,
@@ -568,6 +618,24 @@ exactement ce que parcourent les agents, quel que soit le format dans lequel la
 fusion a été rangée. À défaut de maillage en mémoire, un fichier d'un format
 non lisible est converti plutôt qu'envoyé tel quel.
 
+#### Les encoches, cherchées dans la matière
+
+Le détecteur ne cherche pas les encoches. Il prend l'encombrement du peigne,
+le découpe en tranches égales le long de sa plus grande dimension, et fait
+traverser chaque tranche selon la **plus petite** — à travers l'épaisseur. Les
+segments obtenus ne sont donc parallèles ni aux dents ni aux passages réels,
+et leur nombre est un paramètre codé en dur plutôt que ce que porte la pièce.
+
+Mesuré sur un peigne de dix dents : les dents pointent selon `z`, le détecteur
+traverse selon `y`. Les deux directions sont **perpendiculaires**.
+
+L'ancienne application ne s'en servait pas : elle relisait le STL avec trimesh
+et cherchait les encoches dans la matière — axes par covariance des normales,
+puis histogramme des vides le long de la dent. C'est ce qui est refait ici,
+sur les mêmes fonctions, avant toute mise en forme. Un peigne dont le modèle
+est illisible garde les points du détecteur : approximatifs vaut mieux
+qu'absents, et la console le dit.
+
 Le détecteur repose sur Open3D. Sans lui, le scan ne plante pas : il dit
 pourquoi il n'a pas eu lieu, et le cheminement continue sans fixations
 préexistantes. Cinq causes d'abandon sont distinguées et nommées : dossier non
@@ -601,6 +669,15 @@ qu'elle n'entre en collision avec rien serait faux. L'onglet *Conseils* le
 signale dès le lancement plutôt que de laisser les agents tourner pour rien.
 
 ---
+
+### Comparer exploration et exploitation
+
+Le curseur exploration ↔ exploitation existait, mais sans butée nommée : un
+réglage continu ne se compare pas, puisqu'on ne sait pas relancer deux fois
+exactement au même endroit. Trois repères le bornent désormais —
+**Exploration totale**, **Équilibré**, **Exploitation totale** — qui posent le
+curseur à 1, 0,5 et 0. Le curseur reste libre entre les deux ; les repères ne
+font que le rendre reproductible.
 
 ## Les agents
 
@@ -717,7 +794,7 @@ ui/
   charts.py                 courbes (récompense + grandeurs physiques)
   viewer3d.py               vue 3D incrustée (fil de rendu dédié)
   widgets/  pages/          composants et écrans
-tests/                      460 tests hors interface, 150 tests d'interface
+tests/                      505 tests hors interface, 158 tests d'interface
 ```
 
 `core/geometry_metrics.py`, `core/routing_rules.py`, `core/reward_terms.py` et

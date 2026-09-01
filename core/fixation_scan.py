@@ -33,6 +33,7 @@ __all__ = [
     "DetectedFixation",
     "ScanResult",
     "summarise",
+    "refine_passages",
     "scan",
     "NO_FOLDER",
     "NO_MODELS",
@@ -334,6 +335,74 @@ def scene_for_detection(scene_path, mesh=None, log=None) -> str | None:
     return _convert_scene(path, say)
 
 
+def refine_passages(raw_clamps, log=None) -> int:
+    """Recalcule les passages sur la géométrie réelle des encoches.
+
+    Le détecteur ne cherche pas les encoches : il prend l'encombrement du
+    peigne, le découpe en tranches égales le long de sa plus grande dimension,
+    et fait traverser chaque tranche selon la **plus petite** — c'est-à-dire à
+    travers l'épaisseur. Les segments obtenus ne sont donc parallèles ni aux
+    dents, ni aux passages réels, et leur nombre est un paramètre codé en dur
+    plutôt que ce que porte la pièce.
+
+    L'ancienne application ne s'en servait pas. Elle relisait le STL avec
+    trimesh et cherchait les encoches **dans la matière** : analyse des axes
+    par covariance des normales, puis histogramme des vides le long de la
+    dent. C'est ce que l'on refait ici, sur les mêmes fonctions.
+
+    Les dictionnaires sont modifiés sur place. Un peigne dont le modèle est
+    illisible garde les points du détecteur : approximatifs vaut mieux
+    qu'absents.
+
+    Returns:
+        Le nombre de peignes effectivement recalculés.
+    """
+    say = _printer(log)
+    candidates = [
+        clamp for clamp in (raw_clamps or [])
+        if clamp.get("routing_points") and clamp.get("file_path")
+        and clamp.get("transform") is not None
+    ]
+    if not candidates:
+        return 0
+
+    try:
+        import numpy as np
+        import trimesh
+
+        from core.agent.tool import placer_lignes_dans_encoches_clamp
+    except Exception as exc:
+        say(f"⚠️  Encoches non recalculées ({exc}) : "
+            "les passages restent ceux du détecteur.")
+        return 0
+
+    refined = 0
+    for clamp in candidates:
+        name = clamp.get("name", "?")
+        try:
+            mesh = trimesh.load_mesh(clamp["file_path"], force="mesh")
+            passages, count = placer_lignes_dans_encoches_clamp(
+                mesh, np.asarray(clamp["transform"], dtype=float)
+            )
+        except Exception as exc:
+            say(f"⚠️  {name} : encoches non recalculées ({exc}).")
+            continue
+        if not passages:
+            say(f"⚠️  {name} : aucune encoche trouvée dans la matière, "
+                "les passages du détecteur sont conservés.")
+            continue
+        before = len(clamp["routing_points"]) // 2
+        clamp["routing_points"] = [
+            list(point)
+            for passage in passages
+            for point in (passage["p_in"], passage["p_out"])
+        ]
+        refined += 1
+        say(f"🪮 {name} : {count} encoche(s) trouvée(s) dans la matière "
+            f"(le détecteur en annonçait {before}).")
+    return refined
+
+
 def _report(result: "ScanResult", say) -> None:
     """Récapitule en console ce que le scan a reconnu, fixation par fixation."""
     say("-" * 70)
@@ -418,6 +487,11 @@ def scan(scene_path, clamps_folder, on_progress=None, mesh=None, log=None) -> Sc
         for line in traceback.format_exc().rstrip().splitlines():
             say(f"   {line}")
         return ScanResult(skipped_reason=FAILED, scanned_files=len(models))
+
+    # Les passages du détecteur sont des tranches d'encombrement, pas des
+    # encoches : on les remplace par la géométrie réelle avant toute mise en
+    # forme, sans quoi c'est l'approximation qui partirait vers les agents.
+    refine_passages(raw, log=say)
 
     result = summarise(raw, scanned_files=len(models))
     _report(result, say)

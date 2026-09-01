@@ -59,6 +59,10 @@ MAX_PAIR_SAMPLE = 1500
 #: serré (1,8) le rallongeait de 25 %.
 DEFAULT_CORRIDOR_FACTOR = 3.5
 
+#: En deçà, un écart au bord ne vaut plus la peine d'être tenté : on passe
+#: directement à « sans contrainte » plutôt que de diviser indéfiniment.
+MIN_EDGE_CLEARANCE_MM = 2.0
+
 NO_MESH = "no_mesh"
 NO_PATH = "no_path"
 NO_SCIPY = "no_scipy"
@@ -96,6 +100,8 @@ class SurfacePathResult:
     #: Distance minimale au DMU après décalage, en mm. Mesurée contre le
     #: maillage réel, pas déduite du décalage demandé.
     min_clearance_mm: float = 0.0
+    #: Écart au bord libre réellement obtenu, en mm.
+    edge_clearance_mm: float = 0.0
     #: Décalage effectivement appliqué, en mm (0 = chemin resté sur la surface).
     offset_mm: float = 0.0
 
@@ -123,6 +129,8 @@ class SurfacePathResult:
                      f"({self.bridge_length_mm:.0f} mm)")
             if self.offset_mm:
                 text += f", lifted to {self.min_clearance_mm:.0f} mm off the DMU"
+            if self.edge_clearance_mm:
+                text += f", kept {self.edge_clearance_mm:.0f} mm off free edges"
             return text + "."
 
         text = f"Chemin de surface : {self.total_length_mm:.0f} mm"
@@ -132,6 +140,8 @@ class SurfacePathResult:
                  f"({self.bridge_length_mm:.0f} mm)")
         if self.offset_mm:
             text += f", décollé à {self.min_clearance_mm:.0f} mm du DMU"
+        if self.edge_clearance_mm:
+            text += f", à {self.edge_clearance_mm:.0f} mm des bords libres"
         return text + "."
 
 
@@ -160,6 +170,39 @@ def _corridor_mask(vertices, start, goal, factor: float) -> np.ndarray:
     return mask
 
 
+def _edge_mask(mesh, vertices, clearance_mm: float) -> np.ndarray:
+    """Sommets assez loin des bords libres pour porter le tracé.
+
+    Le plus court chemin le long d'une tôle passe volontiers par son chant :
+    c'est là que la surface est la plus « directe ». Or un chant ne peut
+    recevoir aucune fixation, et use la gaine. On retire donc du graphe les
+    sommets trop proches d'un bord, plutôt que de laisser le tracé y aller
+    pour l'en déloger ensuite à coups de pénalité.
+
+    Si la contrainte vide le graphe — une pièce entièrement étroite — on la
+    lève : mieux vaut un tracé perfectible qu'aucun tracé. Le second membre du
+    couple dit si elle a réellement été appliquée, afin de ne pas annoncer un
+    écart qu'on n'a pas obtenu.
+    """
+    entier = np.ones(len(vertices), dtype=bool)
+    if clearance_mm <= 0:
+        return entier, False
+    try:
+        from core.geometry_metrics import boundary_points, edge_distances
+
+        boundary = boundary_points(mesh)
+    except Exception:
+        return entier, False
+    if len(boundary) == 0:
+        # Pièce fermée : aucun bord libre, la contrainte est sans objet.
+        return entier, False
+
+    mask = edge_distances(vertices, boundary) >= clearance_mm
+    if mask.sum() < 4:
+        return entier, False
+    return mask, True
+
+
 def surface_path(
     mesh,
     start,
@@ -170,6 +213,7 @@ def surface_path(
     corridor_factor: float = DEFAULT_CORRIDOR_FACTOR,
     num_points: int | None = None,
     offset_mm: float = 0.0,
+    edge_clearance_mm: float = 0.0,
 ) -> SurfacePathResult:
     """Chemin le plus court le long de la surface, sauts entre pièces compris.
 
@@ -187,6 +231,11 @@ def surface_path(
             le laisse *sur* la surface, donc en interférence sur toute sa
             longueur — utile pour visualiser la géodésique, inutilisable comme
             point de départ pour les agents.
+        edge_clearance_mm: distance en deçà de laquelle un sommet trop proche
+            d'un bord libre est retiré du graphe. Le chemin le plus court le
+            long d'une tôle passe volontiers par son chant — c'est là que la
+            surface est la plus « directe » — alors qu'aucune fixation ne peut
+            y être posée. Zéro laisse le graphe entier.
 
     Returns:
         Un :class:`SurfacePathResult`. Jamais d'exception, jamais de repli
@@ -208,6 +257,8 @@ def surface_path(
 
     all_vertices = np.asarray(mesh.vertices, dtype=np.float64)
     keep = _corridor_mask(all_vertices, start, goal, corridor_factor)
+    edge_mask, edge_applied = _edge_mask(mesh, all_vertices, float(edge_clearance_mm))
+    keep &= edge_mask
     index_map = np.full(len(all_vertices), -1, dtype=np.int64)
     index_map[keep] = np.arange(int(keep.sum()))
     vertices = all_vertices[keep]
@@ -281,6 +332,20 @@ def surface_path(
         graph, directed=False, indices=start_node, return_predecessors=True
     )
     if not np.isfinite(distances[goal_node]):
+        # Un écart au bord trop ambitieux peut couper la seule voie possible :
+        # entre le contour d'un panneau et son ouverture, la bande utile est
+        # parfois plus étroite que deux fois l'écart demandé. On relâche alors
+        # la contrainte plutôt que de refuser tout tracé — et on dira, plus
+        # bas, ce qui a réellement été obtenu.
+        if edge_clearance_mm > 0:
+            return surface_path(
+                mesh, start, goal,
+                bridge_penalty=bridge_penalty, max_bridge_mm=max_bridge_mm,
+                bridges_per_pair=bridges_per_pair, corridor_factor=corridor_factor,
+                num_points=num_points, offset_mm=offset_mm,
+                edge_clearance_mm=edge_clearance_mm / 2.0
+                if edge_clearance_mm > MIN_EDGE_CLEARANCE_MM else 0.0,
+            )
         return SurfacePathResult(reason=NO_PATH, graph_nodes=n)
 
     # --- remontée du chemin ----------------------------------------------
@@ -339,6 +404,9 @@ def surface_path(
         surface_length_mm=surface_len,
         graph_nodes=n,
         min_clearance_mm=min_clearance,
+        # On n'annonce que ce qu'on a obtenu : une contrainte levée faute de
+        # place ne doit pas se lire comme une contrainte respectée.
+        edge_clearance_mm=float(edge_clearance_mm) if edge_applied else 0.0,
         offset_mm=float(offset_mm or 0.0),
     )
 
