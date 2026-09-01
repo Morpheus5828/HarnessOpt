@@ -1,0 +1,5 @@
+J'aimerais te faire remonter quelques soucis utilisateur que j'ai pu rencontrer lors de la prise en main.
+- Lors du cheminement, lorsque tu as détecter les p_in et p_out je voudrais que tu laisses le choix à l'utilisateur lorsque la pop s'ouvre pour savoir si il veux que l'appli choissient ces pts de fixation, de pouvoir choisir quel couple (p_in, p_out) veux t il choisir stp avec un system de click ou de select box. 
+Tu ajouteras donc le fait de dessiner des petites spèhres sur les p_in et p_out relier d'un segment vert. 
+Lors du cheminement je veux que tu laisses ces spheres et ces segments sur le rendu 3D stp.
+- J'ai remarqué une erreur lors du cheminement en passant par les pts de fixation p_in, p_out), parfois entre la sphère verte et rouge il a des fixations, je suis d'accord que les chemins doivent passer devant, par contre les fixations qui ne sont pas dans la zone de rooting ne doivent pas être pris en compte. Il doit s'arreter au bon endroit.
