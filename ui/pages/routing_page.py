@@ -256,8 +256,11 @@ class RoutingPage(ctk.CTkFrame):
 
         right = ctk.CTkFrame(parent, fg_color="transparent")
         right.grid(row=0, column=1, sticky="nsew", padx=(SPACE.SM, 0))
-        right.grid_rowconfigure(3, weight=4)
-        right.grid_rowconfigure(4, weight=5)
+        # La vue 3D vit dans sa propre fenêtre : la ligne 3 ne porte plus
+        # qu'un bandeau d'état, et toute la hauteur revient aux onglets —
+        # conformité, conseils, agents et courbes, qui la réclamaient.
+        right.grid_rowconfigure(3, weight=0)
+        right.grid_rowconfigure(4, weight=1)
         right.grid_columnconfigure(0, weight=1)
 
         # --- avancement ---------------------------------------------------
@@ -336,23 +339,47 @@ class RoutingPage(ctk.CTkFrame):
             self.view_toggles[key] = box
 
         self.btn_detach = ctk.CTkButton(
-            view_bar, text=t("routing.view.detach"), width=130, height=26,
+            view_bar, text=t("routing.view.detach"), width=150, height=26,
             font=FONT.SMALL_BOLD, fg_color="transparent", border_width=1,
             border_color=theme.BORDER, text_color=theme.TEXT,
             hover_color=theme.SURFACE_ALT, command=self._on_detach,
         )
         self.btn_detach.pack(side="right")
 
-        # --- vue 3D ------------------------------------------------------------
+        # Édition manuelle : l'utilisateur saisit un point du tracé dans la
+        # fenêtre 3D et le déplace. Marquée BETA, elle n'est pas armée par
+        # défaut — des poignées apparaissant sans qu'on les demande gêneraient
+        # la lecture de la scène.
+        self.chk_edit = ctk.CTkCheckBox(
+            view_bar, text=t("routing.view.edit"), font=FONT.SMALL,
+            checkbox_width=17, checkbox_height=17, fg_color=theme.warn,
+            command=self._on_edit_toggled,
+        )
+        self.chk_edit.pack(side="right", padx=(0, SPACE.MD))
+
+        # Les points imposés survivent au décochage — ils ont été posés
+        # délibérément. Les libérer est donc une action à part, et elle doit
+        # exister : une contrainte qu'on ne peut plus retirer est un piège.
+        self.btn_release = ctk.CTkButton(
+            view_bar, text=t("routing.view.edit.clear"), width=180, height=26,
+            font=FONT.SMALL, fg_color="transparent", border_width=1,
+            border_color=theme.BORDER, text_color=theme.TEXT_SOFT,
+            hover_color=theme.SURFACE_ALT, command=self._on_release_pinned,
+        )
+        self.btn_release.pack(side="right", padx=(0, SPACE.MD))
+
+        # --- état de la vue 3D --------------------------------------------------
+        # La petite vue incrustée est supprimée : elle coûtait une capture
+        # d'écran par image pour montrer une scène figée, et se disputait le
+        # pilote graphique avec la vraie fenêtre. Il ne reste ici qu'un état.
         view_frame = ctk.CTkFrame(
             right, fg_color=theme.SURFACE, border_width=1,
             border_color=theme.BORDER, corner_radius=SPACE.RADIUS,
         )
-        view_frame.grid(row=3, column=0, sticky="nsew", pady=(0, SPACE.SM))
+        view_frame.grid(row=3, column=0, sticky="ew", pady=(0, SPACE.SM))
 
-        self.viewer_container = ctk.CTkFrame(view_frame, fg_color=("#EDEFF3", "#0E1116"),
-                                             corner_radius=SPACE.RADIUS_SM)
-        self.viewer_container.pack(fill="both", expand=True, padx=2, pady=2)
+        self.viewer_container = ctk.CTkFrame(view_frame, fg_color="transparent")
+        self.viewer_container.pack(fill="x", padx=SPACE.MD, pady=SPACE.SM)
 
         # --- sorties vivantes, en onglets -----------------------------------------
         # Conformité, agents et courbes se disputaient la place avec la vue 3D.
@@ -462,6 +489,12 @@ class RoutingPage(ctk.CTkFrame):
 
     def _on_detach(self):
         self.app.controller.detach_3d()
+
+    def _on_edit_toggled(self):
+        self.app.controller.set_manual_editing(bool(self.chk_edit.get()))
+
+    def _on_release_pinned(self):
+        self.app.controller.clear_pinned_points()
 
     def _toggle_advanced(self):
         self._advanced_open = not self._advanced_open
@@ -656,9 +689,14 @@ class RoutingPage(ctk.CTkFrame):
         self._tab_names["advice"] = wanted
 
     def set_detached(self, detached: bool):
+        """Le bouton dit ce qu'il fera, pas l'état où l'on se trouve."""
         self.btn_detach.configure(
             text=self.t("routing.view.attach") if detached else self.t("routing.view.detach")
         )
+
+    def set_manual_editing(self, active: bool):
+        """Reflète l'état de l'édition manuelle, sans déclencher la commande."""
+        self.chk_edit.select() if active else self.chk_edit.deselect()
 
     def update_language(self):
         t = self.t

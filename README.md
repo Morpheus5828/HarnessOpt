@@ -259,20 +259,82 @@ se réduit à une ligne droite.
 
 ## La vue 3D
 
-Elle est incrustée dans l'écran *Cheminement* : glisser pour tourner, molette
-pour zoomer, clic droit pour déplacer. « Ouvrir en grand » ouvre en plus une
-fenêtre VTK native, réellement interactive.
+**Une seule vue, et c'est une vraie fenêtre VTK.** L'application en tenait deux :
+une image incrustée dans la page *Cheminement*, produite par capture d'écran
+d'un plotter hors écran, et une fenêtre détachée optionnelle. L'incrustée
+coûtait cher pour ce qu'elle montrait — une image figée, une émulation maison
+de l'orbite, du panoramique et du zoom, et un pipeline de capture qui se
+dispute le pilote graphique avec la fenêtre. Elle est supprimée ; la page ne
+garde qu'un bandeau d'état, et toute la hauteur gagnée revient aux onglets.
 
-Le point important est architectural. **Tout ce qui touche à VTK vit dans un
+Le point important reste architectural. **Tout ce qui touche à VTK vit dans un
 fil de rendu dédié**, qui possède le plotter, reçoit des ordres par une file et
-renvoie des images. L'interface se contente d'afficher la dernière image reçue.
-Aucun appel 3D n'a lieu sur le fil de Tk.
+pompe les évènements de la fenêtre. Aucun appel 3D n'a lieu sur le fil de Tk.
 
 Ce n'est pas une élégance gratuite : construire un `pyvista.Plotter` demande
-**13,6 s** sur une maquette de 800 000 triangles, mesuré. La version précédente
-le faisait sur le fil de l'interface, qui restait donc figée d'autant, puis
-n'affichait jamais la fenêtre ainsi construite — le cadre réservé à la 3D
-restait vide sur toutes les plateformes.
+**13,6 s** sur une maquette de 800 000 triangles, mesuré. La version d'origine
+le faisait sur le fil de l'interface, qui restait donc figée d'autant.
+
+La scène est décrite par des **recettes** — géométrie et style — pas par des
+acteurs VTK. C'est ce qui permet de fermer la fenêtre, de la rouvrir, et d'y
+retrouver la scène intacte, sans jamais partager d'objet VTK entre deux fils.
+Les ordres d'affichage sont donc acceptés même fenêtre fermée : le contrôleur
+n'a pas à savoir si quelqu'un regarde.
+
+### Fermer la fenêtre sans noyer la console
+
+`Plotter.update()` appelle `render()` **sans rien vérifier**. Une fenêtre
+fermée par l'utilisateur ne lève aucune exception : elle rend dans un contexte
+OpenGL détruit, et VTK réclame alors un shader qu'il ne peut plus compiler —
+d'où le flot d'`ERR| Could not create shader object` et
+`attempt to add attribute without a program`.
+
+Il faut donc demander à VTK si sa fenêtre existe encore, et de plusieurs
+façons, aucune n'étant fiable seule d'une plateforme à l'autre : un
+observateur sur `ExitEvent`, l'indicateur `_closed` du plotter, la présence de
+`render_window`, et `GetDone()` sur l'interacteur. Le premier signal reçu
+arrête le rafraîchissement et referme proprement.
+
+### Cliquer et déplacer
+
+Deux gestes que la capture d'écran interdisait :
+
+* **cliquer un repère** — désigner l'encoche qu'on veut emprunter, décrit plus
+  haut. Un clic à plus de 120 mm de tout repère ne désigne **rien** : prendre
+  le plus proche quoi qu'il arrive ferait basculer un choix à l'autre bout de
+  la maquette sur un clic de rotation manqué ;
+* **déplacer une poignée** — l'édition manuelle ci-dessous.
+
+### Édition manuelle du tracé (BETA)
+
+La case *Édition manuelle (BETA)* pose des poignées déplaçables sur le tracé du
+meilleur agent. Glisser l'une d'elles **impose** le point : les agents l'y
+replacent à chaque itération, puis le retirent de ceux qu'ils peuvent bouger.
+L'agent optimise donc autour de la décision de l'intégrateur au lieu de la
+défaire au tour suivant.
+
+Rien de neuf sous le capot : c'est la mécanique des encoches de peigne, ouverte
+à l'utilisateur. Un point posé à la main et une entrée de peigne sont la même
+contrainte, et suivent le même chemin — `snap_mandatory_points`, puis le gel de
+l'indice.
+
+Quelques décisions qui méritent d'être dites :
+
+* **au plus quatorze poignées**, échantillonnées le long du tracé. Une par
+  point serait illisible sur un faisceau de cinquante points, et surtout
+  impossible à saisir : deux poignées voisines se recouvriraient ;
+* **les extrémités n'en reçoivent pas.** A et B appartiennent aux équipements ;
+* **les poignées suivent le tracé** à chaque rafraîchissement, sinon elles
+  désigneraient un point que le câble a quitté ;
+* **décocher la case ne libère pas les points.** Ils ont été posés
+  délibérément, et les perdre au premier décochage ferait tout recommencer.
+  *Libérer les points imposés* est une action à part — et elle existe : une
+  contrainte qu'on ne peut plus retirer est un piège.
+
+Ce qui justifie le BETA : le point imposé est respecté, mais rien ne vérifie
+qu'il est *tenable*. Placé dans la structure, il y restera — les agents
+l'honoreront et le rapport de conformité signalera le clash. C'est un outil
+d'expert, pas un garde-fou.
 
 ---
 
@@ -358,6 +420,17 @@ c'est la même chose qui compte sur un cheminement de 50 cm et sur un de 5 m.
 Mesuré sur deux cadres alignés et un peigne reconnu dans la soute arrière
 (détour ×3,91) : trajet de 7 530 mm sans filtre, 1 841 mm avec.
 
+**Le même couloir retient les trajectoires.** Rien n'empêchait un point d'aller
+au-delà de l'arrivée : `detour_penalty` juge la longueur **totale** et
+répartit sa sanction uniformément, si bien qu'un point parti trois mètres trop
+loin n'y contribue guère plus que ses voisins restés en place — il ne reçoit
+donc aucun signal qui lui dise de revenir. `zone_penalty` sanctionne **point
+par point**, sur la même ellipse : nulle partout dans le couloir, croissante
+au-delà, saturée pour ne pas écraser les autres règles. A et B sont sur
+l'ellipse de rapport 1 : ils ne sont jamais sanctionnés, quel que soit le
+facteur retenu. Une seule notion de zone sert aux deux usages — deux
+finiraient par diverger.
+
 #### Choisir soi-même l'encoche
 
 Une fois le scan terminé et les passages dessinés, l'application ouvre une
@@ -376,6 +449,15 @@ atteignable à l'outil, et rien de cela n'est dans le DMU. Chaque changement se
 répercute **aussitôt sur la vue 3D** : l'encoche désignée s'allume avant même
 de valider, plutôt que d'arbitrer sur des coordonnées. La fenêtre arrive après
 l'affichage, jamais avant.
+
+**Le choix se fait aussi directement en 3D.** La vue s'ouvre d'elle-même au
+lancement du cheminement — poser la question devant une fenêtre fermée
+reviendrait à demander d'arbitrer à l'aveugle — et chaque encoche y est
+cliquable. Cliquer une encoche la retient pour son peigne ; recliquer celle
+qui l'est déjà écarte le peigne. C'est le geste minimal : un peigne n'accepte
+qu'une encoche, donc désigner, c'est choisir, et le seul autre état possible
+est « aucune ». Le clic et la liste déroulante décrivent le même choix et
+restent synchronisés — il ne doit pas en exister deux versions.
 
 Tout ignorer, fermer la fenêtre et écarter chaque peigne un à un reviennent au
 même : aucun passage imposé. La réponse se retrouve sur l'interrupteur
@@ -615,6 +697,7 @@ core/
   diagnostics.py            conseils quand la convergence bloque
   fixation_scan.py          fixations existantes et passages imposés
   passage_route.py          quelle encoche emprunter par peigne, dans quel sens
+                            et quels peignes sont dans le couloir
   reward_terms.py           traduction des règles en signal d'apprentissage
   path_planner.py           recherche du chemin de départ dans l'espace libre
   surface_path.py           chemin le long de la surface, sauts entre pièces compris
@@ -634,7 +717,7 @@ ui/
   charts.py                 courbes (récompense + grandeurs physiques)
   viewer3d.py               vue 3D incrustée (fil de rendu dédié)
   widgets/  pages/          composants et écrans
-tests/                      419 tests hors interface, 141 tests d'interface
+tests/                      460 tests hors interface, 150 tests d'interface
 ```
 
 `core/geometry_metrics.py`, `core/routing_rules.py`, `core/reward_terms.py` et

@@ -286,7 +286,7 @@ class AppWindow(ctk.CTk):
     # -- barre d'état ---------------------------------------------------------
 
     def ask_fixation_choice(self, combs, selection=None, scan_message="",
-                            on_change=None):
+                            on_change=None, on_ready=None):
         """Demande par quelle encoche passer, peigne par peigne.
 
         La question arrive une fois le scan terminé et les passages déjà
@@ -308,6 +308,11 @@ class AppWindow(ctk.CTk):
                 self, combs, selection=selection, lang=self.t.lang,
                 on_change=on_change, scan_message=scan_message,
             )
+            # Le contrôleur a besoin de la fenêtre elle-même : un clic sur une
+            # encoche dans la vue 3D doit déplacer la liste déroulante
+            # correspondante, sans quoi il y aurait deux versions du choix.
+            if on_ready is not None:
+                on_ready(picker)
             return picker.ask()
         except Exception:
             # Sans fenêtre utilisable, on retombe sur ce que l'application

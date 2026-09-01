@@ -25,6 +25,7 @@ __all__ = [
     "free_span_penalty",
     "fixation_coverage_reward",
     "detour_penalty",
+    "zone_penalty",
     "combine",
 ]
 
@@ -287,6 +288,49 @@ def detour_penalty(
         return np.zeros(n, dtype=np.float32)
 
     return np.full(n, -weight * min(ratio - 1.0, 3.0), dtype=np.float32)
+
+
+def zone_penalty(
+    points,
+    start,
+    goal,
+    factor: float = 1.25,
+    weight: float = 90.0,
+    saturation: float = 0.5,
+) -> np.ndarray:
+    """Sanctionne les points sortis du couloir de cheminement.
+
+    Rien ne retenait un point au-delà de l'arrivée. ``detour_penalty`` juge la
+    **longueur totale** et répartit sa sanction uniformément : un point parti
+    trois mètres trop loin y contribue à peine plus que ses voisins restés en
+    place, et ne reçoit donc aucun signal qui lui dise de revenir. D'où des
+    trajectoires qui dépassent la zone de destination et y restent.
+
+    Le couloir est le même que celui qui filtre les peignes : l'ellipsoïde de
+    foyers A et B, où le détour imposé — ``|PA| + |PB|`` — ne dépasse pas
+    ``factor`` fois la distance directe. La sanction est **par point** : elle
+    croît avec le dépassement, sature au-delà de ``saturation`` pour ne pas
+    écraser toutes les autres règles, et vaut exactement zéro partout dans le
+    couloir — un tracé conforme ne doit rien payer.
+
+    A et B eux-mêmes sont sur l'ellipse de rapport 1 : ils ne sont jamais
+    sanctionnés, quel que soit le facteur retenu.
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    a = np.asarray(start, dtype=np.float64)
+    b = np.asarray(goal, dtype=np.float64)
+    if len(pts) == 0:
+        return np.zeros(0, dtype=np.float32)
+
+    direct = float(np.linalg.norm(b - a))
+    if direct < 1e-9:
+        # A et B confondus : le couloir n'a aucun sens, et prétendre le
+        # contraire sanctionnerait la trajectoire entière.
+        return np.zeros(len(pts), dtype=np.float32)
+
+    ratio = (np.linalg.norm(pts - a, axis=1) + np.linalg.norm(pts - b, axis=1)) / direct
+    excess = np.maximum(ratio - float(factor), 0.0)
+    return (-weight * np.minimum(excess / max(saturation, 1e-6), 1.0)).astype(np.float32)
 
 
 def combine(**terms) -> tuple[np.ndarray, dict]:

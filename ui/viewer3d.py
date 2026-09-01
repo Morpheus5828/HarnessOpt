@@ -1,37 +1,32 @@
 """Vue 3D de la maquette et des trajectoires.
 
-Les deux versions précédentes ne montraient rien du tout, pour deux raisons
-distinctes et cumulées :
+**Une seule vue, et c'est une vraie fenêtre VTK.** La version précédente en
+tenait deux : une image incrustée dans la page, produite par capture d'écran
+d'un plotter hors écran, et une fenêtre détachée optionnelle. L'incrustée
+coûtait cher pour ce qu'elle montrait — une image figée, une émulation
+maison de l'orbite, du panoramique et du zoom, et un pipeline de capture qui
+se dispute le pilote graphique avec la fenêtre. Elle est supprimée.
 
-* le ``pyvista.Plotter`` était construit sur le fil principal de Tk. Sur une
-  maquette d'hélicoptère cette construction demande plusieurs secondes — 13,6 s
-  mesurées sur 800 000 triangles — pendant lesquelles l'application entière est
-  figée, sans le moindre curseur d'attente ;
-* la fenêtre de rendu n'était ensuite jamais ni affichée ni « pompée ». En mode
-  incrusté personne n'appelait le rendu ; en mode fenêtre, rien ne s'ouvrait
-  tant que l'utilisateur ne cliquait pas « Ouvrir en grand ». Le cadre réservé
-  à la 3D restait donc vide, sans explication.
+Ce qui reste tient en une phrase : **tout ce qui touche à VTK vit dans un fil
+de rendu dédié, et rien d'autre.** Le fil possède le plotter, reçoit des
+ordres par une file, et pompe les évènements de la fenêtre. Aucun appel VTK
+n'a lieu sur le fil de Tk, donc l'interface ne peut pas se figer — la
+construction du contexte 3D prend treize secondes sur une grosse maquette.
 
-Le principe retenu ici est simple : **tout ce qui touche à VTK vit dans un fil
-de rendu dédié, et rien d'autre.** Ce fil possède un plotter hors écran, reçoit
-des ordres par une file, et renvoie des images. L'interface se contente
-d'afficher la dernière image reçue et de traduire les gestes de souris en
-ordres de caméra. Aucun appel VTK n'a lieu sur le fil de Tk, donc l'interface
-ne peut plus se figer ; et comme le rendu est une simple image, il s'incruste
-dans la fenêtre sur toutes les plateformes, sans manipuler d'identifiant de
-fenêtre natif.
+La scène est décrite par des **recettes** (géométrie + style), pas par des
+acteurs VTK. C'est ce qui permet de fermer la fenêtre, de la rouvrir, et d'y
+retrouver la scène intacte, sans jamais partager d'objet VTK entre deux fils.
 
-Ce choix a un coût assumé : l'image n'est pas rafraîchie à la fréquence d'un
-pilote 3D natif. Pour l'inspection fine, « Ouvrir en grand » ouvre une vraie
-fenêtre VTK interactive, dont les évènements sont cette fois réellement
-traités.
+Deux gestes sont rendus à l'utilisateur, tous deux impossibles sur une image
+capturée : **cliquer** un repère de la scène — pour désigner l'encoche qu'il
+veut emprunter — et **déplacer** une poignée pour imposer un point de passage
+au tracé.
 """
 
 from __future__ import annotations
 
 import queue
 import threading
-import time
 
 import customtkinter as ctk
 
@@ -39,72 +34,58 @@ from ui.theme import FONT, SPACE, current
 
 __all__ = [
     "Viewer3D",
-    "MODE_EMBEDDED",
     "MODE_WINDOW",
+    "MODE_CLOSED",
     "MODE_UNAVAILABLE",
     "MODE_STARTING",
-    "orbit_delta",
-    "pan_delta",
-    "zoom_factor",
+    "nearest_target",
+    "DEFAULT_PICK_TOLERANCE_MM",
 ]
 
-#: Image incrustée dans la fenêtre, pilotée par le fil de rendu.
-MODE_EMBEDDED = "embedded"
-#: Fenêtre VTK native ouverte à côté de l'application.
+#: Fenêtre VTK ouverte.
 MODE_WINDOW = "window"
+#: Fil de rendu prêt, fenêtre fermée. La scène reste mémorisée.
+MODE_CLOSED = "closed"
 #: Aucun rendu possible (PyVista absent, pas de contexte OpenGL…).
 MODE_UNAVAILABLE = "unavailable"
 #: Le fil de rendu démarre encore.
 MODE_STARTING = "starting"
 
-#: Sensibilité des gestes de souris.
-ORBIT_DEG_PER_PIXEL = 0.4
-PAN_FRACTION_PER_PIXEL = 0.0022
-ZOOM_PER_NOTCH = 1.12
+#: Distance maximale entre un clic et un repère pour que le clic le désigne.
+#: Au-delà, l'utilisateur visait autre chose, et deviner à sa place est pire
+#: que ne rien faire.
+DEFAULT_PICK_TOLERANCE_MM = 120.0
 
-#: Délai de regroupement des ordres avant de relancer un rendu, en secondes.
-COALESCE_S = 0.03
-#: Taille de rendu par défaut, avant que le cadre ne connaisse la sienne.
-DEFAULT_SIZE = (900, 600)
-#: Bornes de la taille de rendu, pour ne pas demander une image absurde.
-MIN_SIZE, MAX_SIZE = 160, 2400
+#: Taille de la fenêtre 3D.
+DEFAULT_SIZE = (1280, 860)
 
 
 # ----------------------------------------------------------------------
-# Traduction des gestes en ordres de caméra — fonctions pures, testables
-# sans écran ni VTK.
+# Fonction pure, testable sans écran ni VTK
 # ----------------------------------------------------------------------
 
-def orbit_delta(dx: int, dy: int) -> tuple[float, float]:
-    """Déplacement souris → (azimut, élévation) en degrés.
+def nearest_target(point, targets, tolerance_mm: float = DEFAULT_PICK_TOLERANCE_MM):
+    """Repère désigné par un clic, ou ``None`` si le clic est trop loin.
 
-    L'azimut est inversé pour que la maquette suive le doigt : tirer vers la
-    droite fait tourner la scène vers la droite.
+    ``targets`` est une liste de couples ``(clé, position)``. Un clic dans le
+    vide, ou sur la maquette loin de tout repère, ne doit **rien** désigner :
+    prendre le repère le plus proche quoi qu'il arrive ferait basculer un
+    choix à l'autre bout de la maquette sur un clic de rotation manqué.
     """
-    return (-dx * ORBIT_DEG_PER_PIXEL, dy * ORBIT_DEG_PER_PIXEL)
+    import numpy as np
 
+    if point is None or not targets:
+        return None
+    origin = np.asarray(point, dtype=float)
+    if origin.shape != (3,):
+        return None
 
-def pan_delta(dx: int, dy: int, width: int, height: int) -> tuple[float, float]:
-    """Déplacement souris → translation, en fraction de la hauteur visible.
-
-    On rapporte les deux axes à la hauteur : un déplacement diagonal de la
-    souris doit produire une translation diagonale à l'écran, ce qui suppose
-    la même échelle en x et en y.
-    """
-    ref = max(1, int(height))
-    return (-dx / ref, dy / ref)
-
-
-def zoom_factor(notches: float) -> float:
-    """Crans de molette → facteur de zoom multiplicatif (toujours > 0)."""
-    return float(ZOOM_PER_NOTCH ** notches)
-
-
-def clamp_size(width: int, height: int) -> tuple[int, int]:
-    """Taille de rendu bornée, jamais nulle."""
-    w = max(MIN_SIZE, min(MAX_SIZE, int(width or 0)))
-    h = max(MIN_SIZE, min(MAX_SIZE, int(height or 0)))
-    return w, h
+    best, best_distance = None, float("inf")
+    for key, position in targets:
+        distance = float(np.linalg.norm(np.asarray(position, dtype=float) - origin))
+        if distance < best_distance:
+            best, best_distance = key, distance
+    return best if best_distance <= float(tolerance_mm) else None
 
 
 # ----------------------------------------------------------------------
@@ -120,39 +101,41 @@ class _RenderThread(threading.Thread):
     n'offrant aucune garantie de réentrance.
     """
 
-    def __init__(self, on_frame, on_ready, size, on_window_closed=None):
+    def __init__(self, on_ready, on_window_state, on_pick, on_handle_move, size):
         super().__init__(daemon=True, name="viewer3d")
         self.orders: queue.Queue = queue.Queue()
-        self._on_frame = on_frame
         self._on_ready = on_ready
-        self._on_window_closed = on_window_closed or (lambda: None)
+        self._on_window_state = on_window_state
+        self._on_pick = on_pick
+        self._on_handle_move = on_handle_move
         self._size = size
         self._stop_event = threading.Event()
+
         self.plotter = None
         self.error: str | None = None
-        # Acteurs connus, pour répondre sans interroger VTK depuis un autre fil.
-        self.actor_names: set[str] = set()
-        # Géométrie et style de chaque acteur, pour pouvoir reconstruire la
-        # scène dans la fenêtre détachée. Partager les acteurs VTK entre deux
-        # rendus est possible mais fragile ; les rejouer ne l'est pas.
+        #: Géométrie et style de chaque acteur. La scène vit ici, pas dans
+        #: VTK : c'est ce qui permet de refermer la fenêtre sans la perdre.
         self.recipes: dict[str, tuple] = {}
-        self._window = None
+        self.actor_names: set[str] = set()
+
+        self._exited = False
+        self._pick_targets: list = []
+        self._pick_tolerance = DEFAULT_PICK_TOLERANCE_MM
+        self._handles: list = []
+        self._handle_radius = 30.0
 
     # -- boucle ------------------------------------------------------
 
     def run(self):
-        if not self._build_plotter():
+        if not self._probe():
             self._on_ready(False, self.error)
             return
         self._on_ready(True, None)
 
-        dirty = False
-        last = 0.0
         while not self._stop_event.is_set():
-            # Une fenêtre détachée ouverte doit voir ses évènements traités à
-            # chaque tour, sinon le système la marque « ne répond pas ». C'est
-            # exactement ce qui manquait à la version précédente.
-            timeout = 0.01 if self._window is not None else 0.05
+            # Une fenêtre ouverte doit voir ses évènements traités à chaque
+            # tour, sinon le système la marque « ne répond pas ».
+            timeout = 0.01 if self.plotter is not None else 0.05
             try:
                 order = self.orders.get(timeout=timeout)
             except queue.Empty:
@@ -161,61 +144,80 @@ class _RenderThread(threading.Thread):
             if order is not None:
                 if order[0] == "__stop__":
                     break
-                dirty = self._apply(order) or dirty
-                # On vide la file avant de rendre : dix ordres successifs ne
-                # doivent produire qu'une image, sinon le zoom saccade.
+                self._apply(order)
                 continue
 
-            self._pump_window()
-
-            if dirty and (time.monotonic() - last) >= COALESCE_S:
-                self._emit_frame()
-                dirty = False
-                last = time.monotonic()
+            self._pump()
 
         self._teardown()
 
-    def _pump_window(self):
-        """Traite les évènements de la fenêtre détachée, si elle est ouverte."""
-        if self._window is None:
-            return
-        try:
-            self._window.update()
-        except Exception:
-            # Fenêtre fermée par l'utilisateur : on repasse en incrusté.
-            self._window = None
-            self._on_window_closed()
+    @staticmethod
+    def _probe_import():
+        import pyvista  # noqa: F401
 
-    def _build_plotter(self) -> bool:
+    def _probe(self) -> bool:
+        """PyVista est-il seulement installé ? Le contexte OpenGL, lui, ne se
+        vérifie qu'à l'ouverture de la fenêtre — c'est là qu'il est créé."""
         try:
-            import pyvista as pv
-        except ImportError as exc:
+            self._probe_import()
+        except Exception as exc:
             self.error = f"PyVista n'est pas installé ({exc})."
-            return False
-        try:
-            self.plotter = pv.Plotter(off_screen=True, window_size=list(self._size))
-            self.plotter.set_background("white", top="#DCE3EC")
-            self.plotter.add_axes()
-            self.plotter.enable_lightkit()
-        except Exception as exc:  # contexte OpenGL absent, pilote incomplet…
-            self.plotter = None
-            self.error = str(exc)
             return False
         return True
 
+    def _pump(self):
+        """Traite les évènements de la fenêtre, si elle est encore là."""
+        if self.plotter is None:
+            return
+        if not self._window_alive():
+            # Fermée par l'utilisateur. Continuer à la rafraîchir, c'est
+            # dessiner dans un contexte OpenGL détruit : VTK réclame alors un
+            # shader qu'il ne peut plus compiler et noie la console
+            # d'« ERR| Could not create shader object ».
+            self._drop_window()
+            return
+        try:
+            self.plotter.update()
+        except Exception:
+            self._drop_window()
+
+    def _window_alive(self) -> bool:
+        """La fenêtre est-elle encore utilisable ?
+
+        ``Plotter.update()`` appelle ``render()`` sans vérifier quoi que ce
+        soit : une fenêtre fermée par l'utilisateur ne lève donc aucune
+        exception, elle rend simplement dans le vide. Il faut le demander à
+        VTK, et de plusieurs façons — aucune n'est fiable seule d'une
+        plateforme à l'autre.
+        """
+        plotter = self.plotter
+        if plotter is None or self._exited:
+            return False
+        try:
+            if getattr(plotter, "_closed", False):
+                return False
+            if plotter.render_window is None:
+                return False
+            interactor = getattr(getattr(plotter, "iren", None), "interactor", None)
+            if interactor is not None and interactor.GetDone():
+                return False
+        except Exception:
+            return False
+        return True
+
+    def _drop_window(self, notify: bool = True):
+        plotter, self.plotter = self.plotter, None
+        self._exited = False
+        if plotter is not None:
+            try:
+                plotter.close()
+            except Exception:
+                pass
+        if notify:
+            self._on_window_state(False)
+
     def _teardown(self):
-        if self._window is not None:
-            try:
-                self._window.close()
-            except Exception:
-                pass
-            self._window = None
-        if self.plotter is not None:
-            try:
-                self.plotter.close()
-            except Exception:
-                pass
-        self.plotter = None
+        self._drop_window(notify=False)
 
     def stop(self):
         self._stop_event.set()
@@ -223,154 +225,154 @@ class _RenderThread(threading.Thread):
 
     # -- exécution des ordres ---------------------------------------
 
-    def _apply(self, order) -> bool:
-        """Exécute un ordre. Renvoie True s'il faut redessiner."""
+    def _apply(self, order):
         name, args, kwargs = order[0], order[1], order[2]
         handler = getattr(self, f"_do_{name}", None)
         if handler is None:
-            return False
+            return
         try:
-            return bool(handler(*args, **kwargs))
+            handler(*args, **kwargs)
         except Exception:
             # Un ordre invalide ne doit pas emporter le fil de rendu : la 3D
             # est un confort, le cheminement doit continuer.
-            return False
+            pass
+
+    # -- contenu -----------------------------------------------------
 
     def _do_add(self, geometry, name, **style):
-        self.plotter.add_mesh(geometry, name=name, **style)
-        self.actor_names.add(name)
         self.recipes[name] = (geometry, dict(style))
-        if self._window is not None:
+        self.actor_names.add(name)
+        if self._window_alive():
             try:
-                self._window.add_mesh(geometry, name=name, **style)
+                self.plotter.add_mesh(geometry, name=name, **style)
             except Exception:
                 pass
-        return True
 
     def _do_remove(self, name):
-        try:
-            self.plotter.remove_actor(name)
-        except Exception:
-            pass
-        if self._window is not None:
+        self.recipes.pop(name, None)
+        self.actor_names.discard(name)
+        if self._window_alive():
             try:
-                self._window.remove_actor(name)
+                self.plotter.remove_actor(name)
             except Exception:
                 pass
-        self.actor_names.discard(name)
-        self.recipes.pop(name, None)
-        return True
 
     def _do_visible(self, name, visible):
+        if not self._window_alive():
+            return
         actor = self.plotter.actors.get(name)
-        if actor is None:
-            return False
-        actor.SetVisibility(bool(visible))
-        return True
+        if actor is not None:
+            actor.SetVisibility(bool(visible))
 
     def _do_edges(self, name, show):
+        if not self._window_alive():
+            return
         actor = self.plotter.actors.get(name)
-        if actor is None:
-            return False
-        actor.prop.show_edges = bool(show)
-        return True
-
-    def _do_resize(self, width, height):
-        self.plotter.window_size = [int(width), int(height)]
-        return True
+        if actor is not None:
+            actor.prop.show_edges = bool(show)
 
     def _do_reset_camera(self):
-        self.plotter.reset_camera()
-        return True
-
-    def _do_orbit(self, azimuth, elevation):
-        cam = self.plotter.camera
-        cam.Azimuth(float(azimuth))
-        cam.Elevation(float(elevation))
-        cam.OrthogonalizeViewUp()
-        return True
-
-    def _do_pan(self, fx, fy):
-        """Translate la caméra dans son plan image.
-
-        ``fx``/``fy`` sont exprimés en fraction de la hauteur visible, ce qui
-        rend le geste indépendant de la distance à la scène.
-        """
-        import numpy as np
-
-        cam = self.plotter.camera
-        pos = np.array(cam.position, dtype=float)
-        foc = np.array(cam.focal_point, dtype=float)
-        up = np.array(cam.up, dtype=float)
-
-        forward = foc - pos
-        distance = float(np.linalg.norm(forward))
-        if distance <= 0:
-            return False
-        forward /= distance
-        right = np.cross(forward, up)
-        norm = np.linalg.norm(right)
-        if norm <= 0:
-            return False
-        right /= norm
-        true_up = np.cross(right, forward)
-
-        # Hauteur réellement visible à la distance du point de mire.
-        height = 2.0 * distance * np.tan(np.radians(float(cam.view_angle)) / 2.0)
-        shift = right * (fx * height) + true_up * (fy * height)
-        cam.position = tuple(pos + shift)
-        cam.focal_point = tuple(foc + shift)
-        return True
-
-    def _do_zoom(self, factor):
-        self.plotter.camera.Zoom(float(factor))
-        return True
+        if self._window_alive():
+            self.plotter.reset_camera()
 
     def _do_render(self):
-        return True
+        return
 
-    def _do_show_window(self):
-        """Ouvre une vraie fenêtre VTK interactive, à côté de la vue incrustée.
+    # -- fenêtre -----------------------------------------------------
 
-        La scène y est rejouée depuis les recettes mémorisées. La fenêtre est
-        ensuite pompée par la boucle principale du fil : ses évènements sont
-        donc réellement traités, ce qui n'était pas le cas auparavant.
-        """
+    def _do_open_window(self):
+        if self._window_alive():
+            return
+        self._drop_window(notify=False)
+
         import pyvista as pv
 
-        if self._window is not None:
-            return False
-        window = pv.Plotter(window_size=[1100, 800])
-        window.set_background("white", top="#DCE3EC")
+        plotter = pv.Plotter(window_size=list(self._size), title="HarnessOpt — vue 3D")
+        plotter.set_background("white", top="#DCE3EC")
         for name, (geometry, style) in list(self.recipes.items()):
             try:
-                window.add_mesh(geometry, name=name, **style)
+                plotter.add_mesh(geometry, name=name, **style)
             except Exception:
                 continue
-        window.add_axes()
-        window.reset_camera()
-        window.show(interactive_update=True, auto_close=False)
-        self._window = window
-        return False
+        plotter.add_axes()
+        plotter.reset_camera()
+        plotter.show(interactive_update=True, auto_close=False)
+
+        self.plotter = plotter
+        self._exited = False
+        self._observe_exit()
+        self._install_picking()
+        self._install_handles()
+        self._on_window_state(True)
 
     def _do_close_window(self):
-        if self._window is None:
-            return False
+        if self.plotter is None:
+            return
+        self._drop_window()
+
+    def _observe_exit(self):
+        """La fermeture par l'utilisateur passe par ``ExitEvent``."""
         try:
-            self._window.close()
+            self.plotter.iren.add_observer("ExitEvent", self._mark_exited)
         except Exception:
             pass
-        self._window = None
-        self._on_window_closed()
-        return False
 
-    def _emit_frame(self):
-        try:
-            image = self.plotter.screenshot(return_img=True)
-        except Exception:
+    def _mark_exited(self, *_args):
+        self._exited = True
+
+    # -- désignation par clic ----------------------------------------
+
+    def _do_set_pick_targets(self, targets, tolerance):
+        self._pick_targets = list(targets or [])
+        self._pick_tolerance = float(tolerance)
+        self._install_picking()
+
+    def _install_picking(self):
+        if not self._window_alive() or not self._pick_targets:
             return
-        if image is not None:
-            self._on_frame(image)
+        try:
+            self.plotter.enable_point_picking(
+                callback=self._picked, left_clicking=True, show_message=False,
+                show_point=False,
+            )
+        except Exception:
+            pass
+
+    def _picked(self, point, *_args):
+        key = nearest_target(point, self._pick_targets, self._pick_tolerance)
+        if key is not None:
+            self._on_pick(key)
+
+    # -- poignées déplaçables ----------------------------------------
+
+    def _do_set_handles(self, points, radius):
+        self._handles = [list(p) for p in (points or [])]
+        self._handle_radius = float(radius)
+        self._install_handles()
+
+    def _install_handles(self):
+        if not self._window_alive():
+            return
+        try:
+            self.plotter.clear_sphere_widgets()
+        except Exception:
+            pass
+        if not self._handles:
+            return
+        try:
+            import numpy as np
+
+            self.plotter.add_sphere_widget(
+                self._handle_moved,
+                center=np.asarray(self._handles, dtype=float),
+                radius=self._handle_radius, color="#E5B300",
+                selected_color="#D93A45", test_callback=False,
+            )
+        except Exception:
+            pass
+
+    def _handle_moved(self, center, index=0):
+        self._on_handle_move(int(index), tuple(float(c) for c in center))
 
 
 # ----------------------------------------------------------------------
@@ -378,12 +380,13 @@ class _RenderThread(threading.Thread):
 # ----------------------------------------------------------------------
 
 class Viewer3D:
-    """Vue 3D incrustée, pilotée par un fil de rendu.
+    """Vue 3D pilotée par un fil de rendu.
 
-    L'API est celle de la version précédente — ``show_mesh``, ``show_path``,
-    ``set_visible``… — de sorte que le contrôleur n'a pas à savoir comment le
-    rendu est produit. Toutes ces méthodes sont non bloquantes : elles
-    déposent un ordre et rendent la main immédiatement.
+    Toutes les méthodes de contenu — ``show_mesh``, ``show_path``,
+    ``show_sphere``… — sont non bloquantes et acceptées **même fenêtre
+    fermée** : elles alimentent la scène mémorisée, qui sera rejouée à
+    l'ouverture. Le contrôleur n'a donc jamais à savoir si une fenêtre est
+    ouverte pour décrire ce qu'il veut montrer.
     """
 
     def __init__(self, container, on_status=None, t=None):
@@ -396,23 +399,16 @@ class Viewer3D:
 
         self._thread: _RenderThread | None = None
         self._actors: set[str] = set()
-        self._label: ctk.CTkLabel | None = None
         self._placeholder: ctk.CTkLabel | None = None
-        self._photo = None
-        self._size = DEFAULT_SIZE
-        self._drag: tuple[int, int] | None = None
-        self._drag_mode = "orbit"
-        self._detached = False
         self._closed = False
+        self._open = False
+        self._on_pick = None
+        self._on_handle_move = None
 
     # -- cycle de vie ---------------------------------------------------
 
     def start(self) -> str:
-        """Démarre le fil de rendu. **Ne bloque pas.**
-
-        Renvoie ``MODE_STARTING`` : le mode définitif est communiqué plus tard
-        par la fonction de statut, une fois le contexte 3D construit.
-        """
+        """Démarre le fil de rendu. **Ne bloque pas.**"""
         if self._thread is not None:
             return self.mode
 
@@ -420,10 +416,11 @@ class Viewer3D:
                                        "Préparation de la vue 3D…"))
         self.mode = MODE_STARTING
         self._thread = _RenderThread(
-            on_frame=self._post_frame,
             on_ready=self._post_ready,
-            size=self._size,
-            on_window_closed=self._post_window_closed,
+            on_window_state=self._post_window_state,
+            on_pick=self._post_pick,
+            on_handle_move=self._post_handle_move,
+            size=DEFAULT_SIZE,
         )
         self._thread.start()
         return self.mode
@@ -444,38 +441,13 @@ class Viewer3D:
                 + self._t("routing.view.still_running",
                           "Le calcul du cheminement, lui, continue normalement.")
             )
-            self._notify()
-            return
-
-        self.mode = MODE_EMBEDDED
-        self._build_canvas()
+        else:
+            self.mode = MODE_CLOSED
+            self._show_placeholder(
+                self._t("routing.view.closed",
+                        "La vue 3D s'ouvre dans sa propre fenêtre.")
+            )
         self._notify()
-        self.render()
-
-    def _build_canvas(self):
-        """Remplace le message d'attente par la zone d'image interactive."""
-        if self._placeholder is not None:
-            self._placeholder.destroy()
-            self._placeholder = None
-        if self._label is not None:
-            return
-
-        self._label = ctk.CTkLabel(self.container, text="", fg_color="transparent")
-        self._label.pack(fill="both", expand=True)
-
-        self._label.bind("<Configure>", self._on_configure)
-        self._label.bind("<ButtonPress-1>", lambda e: self._begin_drag(e, "orbit"))
-        self._label.bind("<ButtonPress-2>", lambda e: self._begin_drag(e, "pan"))
-        self._label.bind("<ButtonPress-3>", lambda e: self._begin_drag(e, "pan"))
-        self._label.bind("<Shift-ButtonPress-1>", lambda e: self._begin_drag(e, "pan"))
-        for seq in ("<B1-Motion>", "<B2-Motion>", "<B3-Motion>", "<Shift-B1-Motion>"):
-            self._label.bind(seq, self._on_drag)
-        for seq in ("<ButtonRelease-1>", "<ButtonRelease-2>", "<ButtonRelease-3>"):
-            self._label.bind(seq, self._end_drag)
-        # Windows et macOS envoient <MouseWheel>, X11 des boutons 4 et 5.
-        self._label.bind("<MouseWheel>", self._on_wheel)
-        self._label.bind("<Button-4>", lambda e: self._zoom(1))
-        self._label.bind("<Button-5>", lambda e: self._zoom(-1))
 
     def close(self):
         self._closed = True
@@ -483,17 +455,25 @@ class Viewer3D:
             self._thread.stop()
             self._thread = None
         self._actors.clear()
+        self._open = False
         self.mode = MODE_UNAVAILABLE
 
     @property
     def is_available(self) -> bool:
         """Vrai dès que des ordres peuvent être acceptés.
 
-        Vrai aussi pendant le démarrage : les ordres émis à ce moment-là sont
-        mis en file et exécutés dès que le contexte 3D est prêt. C'est ce qui
-        permet au contrôleur de charger la maquette sans attendre.
+        Vrai fenêtre fermée : les ordres alimentent la scène mémorisée. Vrai
+        aussi pendant le démarrage, ce qui permet au contrôleur de charger la
+        maquette sans attendre.
         """
-        return self._thread is not None and self.mode in (MODE_STARTING, MODE_EMBEDDED)
+        return self._thread is not None and self.mode in (
+            MODE_STARTING, MODE_CLOSED, MODE_WINDOW
+        )
+
+    @property
+    def is_open(self) -> bool:
+        """La fenêtre 3D est-elle ouverte ?"""
+        return self._open
 
     # -- envoi d'ordres --------------------------------------------------
 
@@ -587,97 +567,78 @@ class Viewer3D:
     def render(self):
         self._order("render")
 
-    def show_window(self):
-        """Ouvre la maquette dans une fenêtre VTK réellement interactive."""
+    # -- fenêtre ---------------------------------------------------------
+
+    def open_window(self):
+        """Ouvre la fenêtre 3D et y rejoue la scène mémorisée."""
         if not self.is_available:
             return
-        self._detached = True
-        self._order("show_window")
+        self._order("open_window")
 
     def close_window(self):
-        """Referme la fenêtre détachée ; la vue incrustée reprend seule."""
         if not self.is_available:
             return
         self._order("close_window")
 
     def toggle_window(self) -> bool:
-        """Ouvre ou referme la fenêtre détachée. Renvoie son nouvel état."""
-        if self._detached:
+        """Ouvre ou referme la fenêtre. Renvoie l'état visé."""
+        if self._open:
             self.close_window()
-        else:
-            self.show_window()
-        return self._detached
+            return False
+        self.open_window()
+        return True
 
-    @property
-    def is_detached(self) -> bool:
-        return self._detached
+    def _post_window_state(self, is_open: bool):
+        self._post(self._on_window_state, is_open)
 
-    def _post_window_closed(self):
-        self._post(self._on_window_closed)
-
-    def _on_window_closed(self):
-        self._detached = False
-        if self._on_status is not None:
-            self._on_status(self.mode, self.error)
-
-    # -- gestes de souris ------------------------------------------------
-
-    def _begin_drag(self, event, mode: str):
-        self._drag = (event.x, event.y)
-        self._drag_mode = mode
-
-    def _on_drag(self, event):
-        if self._drag is None:
+    def _on_window_state(self, is_open: bool):
+        if self._closed:
             return
-        dx, dy = event.x - self._drag[0], event.y - self._drag[1]
-        self._drag = (event.x, event.y)
-        if dx == 0 and dy == 0:
-            return
-        if self._drag_mode == "pan":
-            fx, fy = pan_delta(dx, dy, *self._size)
-            self._order("pan", fx, fy)
-        else:
-            az, el = orbit_delta(dx, dy)
-            self._order("orbit", az, el)
+        self._open = bool(is_open)
+        self.mode = MODE_WINDOW if is_open else MODE_CLOSED
+        self._show_placeholder(
+            self._t("routing.view.opened", "Vue 3D ouverte dans sa fenêtre.")
+            if is_open else
+            self._t("routing.view.closed", "La vue 3D s'ouvre dans sa propre fenêtre.")
+        )
+        self._notify()
 
-    def _end_drag(self, _event=None):
-        self._drag = None
+    # -- désignation par clic --------------------------------------------
 
-    def _on_wheel(self, event):
-        # Windows : delta multiple de 120. macOS : petites valeurs signées.
-        delta = getattr(event, "delta", 0)
-        self._zoom(1 if delta > 0 else -1)
+    def set_pick_targets(self, targets, tolerance_mm: float = DEFAULT_PICK_TOLERANCE_MM):
+        """Repères cliquables : une liste de couples ``(clé, position)``."""
+        self._order("set_pick_targets", list(targets or []), float(tolerance_mm))
 
-    def _zoom(self, notches: float):
-        self._order("zoom", zoom_factor(notches))
+    def set_on_pick(self, callback):
+        self._on_pick = callback
 
-    def _on_configure(self, event):
-        size = clamp_size(event.width, event.height)
-        if size == self._size:
-            return
-        self._size = size
-        self._order("resize", *size)
-        self._order("render")
+    def _post_pick(self, key):
+        self._post(self._deliver_pick, key)
 
-    # -- réception des images --------------------------------------------
+    def _deliver_pick(self, key):
+        if self._on_pick is not None and not self._closed:
+            self._on_pick(key)
 
-    def _post_frame(self, image):
-        self._post(self._show_frame, image)
+    # -- poignées déplaçables --------------------------------------------
 
-    def _show_frame(self, image):
-        """Affiche une image reçue du fil de rendu. Toujours sur le fil Tk."""
-        if self._closed or self._label is None:
-            return
-        try:
-            from PIL import Image
-        except ImportError:
-            return
-        try:
-            pil = Image.fromarray(image)
-            self._photo = ctk.CTkImage(light_image=pil, dark_image=pil, size=pil.size)
-            self._label.configure(image=self._photo, text="")
-        except Exception:
-            pass
+    def set_handles(self, points, radius: float = 30.0):
+        """Place des poignées déplaçables aux points donnés."""
+        self._order("set_handles", list(points or []), float(radius))
+
+    def clear_handles(self):
+        self.set_handles([])
+
+    def set_on_handle_move(self, callback):
+        self._on_handle_move = callback
+
+    def _post_handle_move(self, index, point):
+        self._post(self._deliver_handle_move, index, point)
+
+    def _deliver_handle_move(self, index, point):
+        if self._on_handle_move is not None and not self._closed:
+            self._on_handle_move(index, point)
+
+    # -- messages ---------------------------------------------------------
 
     def _post(self, callback, *args):
         """Repasse sur le fil de Tk, seul autorisé à toucher aux widgets."""
@@ -688,18 +649,22 @@ class Viewer3D:
         except Exception:
             pass
 
-    # -- messages ---------------------------------------------------------
-
     def _show_placeholder(self, message: str):
         theme = current()
         if self._placeholder is None:
-            self._placeholder = ctk.CTkLabel(
-                self.container, text=message, font=FONT.BODY,
-                text_color=theme.TEXT_SOFT, justify="center", wraplength=420,
-            )
-            self._placeholder.pack(expand=True, padx=SPACE.LG, pady=SPACE.LG)
+            try:
+                self._placeholder = ctk.CTkLabel(
+                    self.container, text=message, font=FONT.BODY,
+                    text_color=theme.TEXT_SOFT, justify="center", wraplength=420,
+                )
+                self._placeholder.pack(expand=True, padx=SPACE.LG, pady=SPACE.LG)
+            except Exception:
+                self._placeholder = None
         else:
-            self._placeholder.configure(text=message)
+            try:
+                self._placeholder.configure(text=message)
+            except Exception:
+                pass
 
     def _notify(self):
         if self._on_status is not None:
