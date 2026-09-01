@@ -30,10 +30,13 @@ from core import paths
 from core import diagnostics, fixation_scan
 from core.passage_route import (
     DEFAULT_ZONE_FACTOR as ZONE_FACTOR,
+    Crossing,
     choose_crossings,
     default_selection,
     describe as describe_crossings,
     filter_combs,
+    in_routing_zone,
+    merge_anchors,
 )
 from core.orchestrator import ROLES, Orchestrator
 from core.routing_rules import ALL_RULES, ClearanceModel, HarnessSpec, RoutingRules
@@ -116,6 +119,8 @@ class AppController:
         self.manual_editing = False
         #: Points imposés à la main, par rang de poignée.
         self.pinned_points: dict = {}
+        #: Fixations simples reconnues sur la maquette, imposées elles aussi.
+        self.fixation_points: list = []
         self._handle_indices: list = []
         self._initial_path = None
         #: Quoi faire d'un clic sur une encoche. Posé le temps du choix.
@@ -293,6 +298,7 @@ class AppController:
                 bend_radius_factor=values["bend_radius_factor"],
             ),
             clearance=clearance,
+            edge_clearance_mm=values.get("edge_clearance", 25.0),
             fixation_pitch_mm=values["fixation_pitch"],
             fixation_parallel_tol_deg=values["fixation_parallel_tol"],
             enabled_rules=frozenset(values.get("enabled_rules", ALL_RULES)),
@@ -404,6 +410,10 @@ class AppController:
                     # hors zone et pour retenir les trajectoires. Deux notions
                     # de « zone » finiraient par diverger.
                     "zone_factor": ZONE_FACTOR,
+                    "edge_clearance_mm": (
+                        rules.edge_clearance_mm
+                        if rules.is_enabled("edge_clearance") else 0.0
+                    ),
                     "existing_crabes": [],
                 }
             )
@@ -486,6 +496,14 @@ class AppController:
             config["mandatory_points"] = [
                 point for crossing in crossings for point in crossing.points
             ]
+
+            # Fixations sans encoche : un point, pas une traversée. Même
+            # mécanique que l'édition manuelle — épinglés puis gelés — car
+            # l'attraction par récompense ne garantit pas plus le passage ici
+            # qu'ailleurs.
+            self.fixation_points = self._fixation_points_to_use(values)
+            self.pinned_points.clear()
+            self._publish_pinned(config)
 
             self.shared_state = {
                 "is_playing": False,
@@ -632,18 +650,44 @@ class AppController:
         a = np.asarray(self.point_a, dtype=np.float64)
         b = np.asarray(self.point_b, dtype=np.float64)
 
-        crossings = self._crossings_to_use(values)
-        if not crossings:
+        anchors = merge_anchors(
+            a, b, self._crossings_to_use(values), self._fixation_points_to_use(values)
+        )
+        if not anchors:
             return [a, b], set()
 
         nodes = [a]
         forced_straight = set()
-        for crossing in crossings:
-            nodes.append(np.asarray(crossing.entry, dtype=np.float64))
-            forced_straight.add(len(nodes) - 1)  # tronçon entrée -> sortie
-            nodes.append(np.asarray(crossing.exit, dtype=np.float64))
+        for anchor in anchors:
+            if isinstance(anchor, Crossing):
+                nodes.append(np.asarray(anchor.entry, dtype=np.float64))
+                forced_straight.add(len(nodes) - 1)  # tronçon entrée -> sortie
+                nodes.append(np.asarray(anchor.exit, dtype=np.float64))
+            else:
+                # Une fixation simple impose un point, pas une traversée : le
+                # tracé doit y passer, il n'a rien à y franchir.
+                nodes.append(np.asarray(anchor, dtype=np.float64))
         nodes.append(b)
         return nodes, forced_straight
+
+    def _fixation_points_to_use(self, values):
+        """Fixations sans encoche à emprunter : clips et crabes déjà montés.
+
+        Elles étaient purement ignorées, faute d'encoche à choisir — et le
+        tracé passait donc à côté de fixations parfaitement utilisables,
+        coupant au plus court plutôt que de suivre la ligne existante.
+        """
+        if not values.get("use_fixations", False):
+            return []
+        result = getattr(self, "scan_result", None)
+        if result is None or not result.ran:
+            return []
+        return [
+            tuple(float(c) for c in fixation.position)
+            for fixation in result.fixations
+            if not fixation.passages and len(fixation.position) == 3
+            and in_routing_zone(self.point_a, self.point_b, fixation.position)
+        ]
 
     def _combs_to_use(self, values):
         """Peignes dont une encoche doit être empruntée.
@@ -718,7 +762,12 @@ class AppController:
             band = rules.clearance.max_mm - rules.clearance.default_min_mm
             target = rules.clearance.default_min_mm + 0.25 * max(band, 0.0)
 
-            result = surface_path(mesh, a, b, num_points=n_points, offset_mm=target)
+            # Le chant de la tôle est écarté du graphe, pas seulement pénalisé
+            # après coup : un tracé qui part le long d'un bord y reste.
+            edge_min = (rules.edge_clearance_mm
+                        if rules.is_enabled("edge_clearance") else 0.0)
+            result = surface_path(mesh, a, b, num_points=n_points,
+                                  offset_mm=target, edge_clearance_mm=edge_min)
             return (result.points, result.message(lang)) if result.success \
                 else (None, result.message(lang))
 
@@ -1349,15 +1398,25 @@ class AppController:
         self._publish_pinned()
         self.view.set_status(self.t("routing.view.edit.pinned"), "ok")
 
-    def _publish_pinned(self):
-        """Transmet les points imposés aux agents, sans relancer le calcul."""
-        points = [list(p) for p in self.pinned_points.values()]
-        if self.shared_state is not None:
+    def _publish_pinned(self, config=None):
+        """Transmet les points imposés aux agents, sans relancer le calcul.
+
+        Deux origines, une seule liste : les fixations simples reconnues sur la
+        maquette, et les points posés à la main dans la vue 3D. L'agent n'a pas
+        à savoir d'où vient une contrainte pour la respecter.
+        """
+        points = [list(p) for p in self.fixation_points]
+        points += [list(p) for p in self.pinned_points.values()]
+        if config is not None:
+            config["pinned_points"] = points
+        elif self.shared_state is not None:
             with self.data_lock:
                 self.shared_state["config"]["pinned_points"] = points
         self._draw_pinned()
 
     def _draw_pinned(self):
+        """Ne dessine que les points posés à la main : les fixations reconnues
+        sont déjà à l'écran, avec leur propre géométrie."""
         if self.viewer is None or not self.viewer.is_available:
             return
         self.viewer.remove_prefix("pinned_")

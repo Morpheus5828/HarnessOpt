@@ -38,6 +38,7 @@ __all__ = [
     "describe",
     "detour_ratio",
     "filter_combs",
+    "merge_anchors",
     "in_routing_zone",
     "DEFAULT_ZONE_FACTOR",
 ]
@@ -256,6 +257,40 @@ def choose_crossings(start, goal, combs, zone_factor: float = DEFAULT_ZONE_FACTO
         index = backs[depth][index]
     chosen.reverse()
     return chosen
+
+
+def merge_anchors(start, goal, crossings, points) -> list:
+    """Fusionne traversées de peigne et fixations simples, dans l'ordre du trajet.
+
+    Une fixation sans encoche — un clip, un crabe déjà monté — n'impose pas de
+    traversée : elle impose un **point**. Elle était purement ignorée, faute
+    d'encoche à choisir, et le tracé passait donc à côté de fixations qu'il
+    aurait pu emprunter. C'est ce que voit l'utilisateur : un cheminement qui
+    coupe au plus court au lieu de suivre la ligne de fixations existante.
+
+    Args:
+        start, goal: extrémités du faisceau.
+        crossings: traversées retenues, une par peigne.
+        points: positions des fixations simples.
+
+    Returns:
+        Une liste d'étapes, dans l'ordre : chaque élément est soit un
+        :class:`Crossing`, soit un point ``(x, y, z)``.
+    """
+    start = np.asarray(start, dtype=np.float64)
+    goal = np.asarray(goal, dtype=np.float64)
+    direction = goal - start
+    norm = float(np.linalg.norm(direction))
+    direction = direction / norm if norm > 1e-9 else np.array([1.0, 0.0, 0.0])
+
+    def rank(anchor):
+        position = (np.asarray(anchor.entry, dtype=np.float64)
+                    if isinstance(anchor, Crossing)
+                    else np.asarray(anchor, dtype=np.float64))
+        return float(np.dot(position - start, direction))
+
+    anchors = list(crossings) + [tuple(float(c) for c in p) for p in (points or [])]
+    return sorted(anchors, key=rank)
 
 
 def describe(crossings, combs=None, lang: str = "FR") -> str:

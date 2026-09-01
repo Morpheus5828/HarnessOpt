@@ -36,6 +36,8 @@ __all__ = [
     "longest_free_span",
     "support_gaps",
     "resample_by_arclength",
+    "boundary_points",
+    "edge_distances",
 ]
 
 #: En deçà de cette longueur (mm) un segment est considéré dégénéré et ignoré
@@ -453,3 +455,60 @@ def resample_by_arclength(points: np.ndarray, step_mm: float) -> np.ndarray:
     for axis in range(3):
         out[:, axis] = np.interp(targets, cum, pts[:, axis])
     return out
+
+
+# ----------------------------------------------------------------------
+# Bords libres de la structure
+# ----------------------------------------------------------------------
+
+def boundary_points(mesh, samples_per_edge: int = 3) -> np.ndarray:
+    """Points échantillonnés sur les **arêtes libres** du maillage.
+
+    Une arête libre est une arête portée par une seule face : c'est le bord de
+    la tôle, là où la matière s'arrête. Un faisceau qui longe un tel bord frotte
+    sur un chant, et surtout ne peut pas y être tenu — il n'y a plus de matière
+    pour recevoir une fixation.
+
+    On échantillonne le long de chaque arête plutôt que d'en garder les seuls
+    sommets : sur un maillage grossier, deux sommets de bord peuvent être
+    distants de plusieurs centimètres, et un tracé passant entre les deux
+    paraîtrait à bonne distance alors qu'il rase le bord.
+    """
+    faces = np.asarray(getattr(mesh, "faces", []), dtype=np.int64)
+    vertices = np.asarray(getattr(mesh, "vertices", []), dtype=np.float64)
+    if len(faces) == 0 or len(vertices) == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+
+    edges = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    edges = np.sort(edges, axis=1)
+    unique, counts = np.unique(edges, axis=0, return_counts=True)
+    free = unique[counts == 1]
+    if len(free) == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+
+    a, b = vertices[free[:, 0]], vertices[free[:, 1]]
+    steps = np.linspace(0.0, 1.0, max(2, int(samples_per_edge)))
+    return np.concatenate([a + t * (b - a) for t in steps], axis=0)
+
+
+def edge_distances(points, boundary) -> np.ndarray:
+    """Distance de chaque point au bord libre le plus proche, en mm.
+
+    Renvoie ``+inf`` partout si le maillage n'a aucun bord libre : une pièce
+    fermée n'impose aucune contrainte de bord, et rendre zéro condamnerait
+    le tracé entier.
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    ref = np.asarray(boundary, dtype=np.float64)
+    if len(pts) == 0:
+        return np.zeros(0, dtype=np.float64)
+    if len(ref) == 0:
+        return np.full(len(pts), np.inf, dtype=np.float64)
+
+    try:
+        from scipy.spatial import cKDTree
+
+        return cKDTree(ref).query(pts)[0]
+    except ImportError:
+        # Repli sans scipy : exact, simplement plus coûteux.
+        return np.array([np.linalg.norm(ref - p, axis=1).min() for p in pts])

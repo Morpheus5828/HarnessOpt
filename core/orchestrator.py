@@ -312,6 +312,17 @@ class Phase:
         return Phase.POLISH
 
 
+#: Trois repères nommés sur le curseur exploration / exploitation. Un réglage
+#: continu sans butée ne se compare pas : pour juger de l'effet de
+#: l'exploration, il faut pouvoir relancer deux fois exactement au même
+#: endroit. Les valeurs sont les deux extrêmes et leur milieu, rien de plus.
+EXPLORATION_MODES: dict[str, float] = {
+    "explore": 1.0,
+    "balanced": 0.5,
+    "exploit": 0.0,
+}
+
+
 # ---------------------------------------------------------------------------
 # Exploration / exploitation
 # ---------------------------------------------------------------------------

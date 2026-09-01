@@ -127,6 +127,9 @@ FR: dict[str, str] = {
         "la distance minimale générale s'appliquera partout."
     ),
     "rules.fixations": "Fixations",
+    "rules.edge": "Distance minimale au bord de tôle",
+    "rules.edge.help": "Le câble ne longe pas un chant de tôle : il y userait sa "
+                       "gaine, et surtout aucune fixation ne peut y être posée.",
     "rules.pitch": "Pas maximal entre fixations",
     "rules.pitch.help": (
         "Au-delà de cette distance sans point de fixation, l'agent doit poser un crabe."
@@ -175,6 +178,9 @@ FR: dict[str, str] = {
         "À droite, ils cherchent large, quitte à repartir de zéro. "
         "Le réglage se modifie en cours de calcul."
     ),
+    "routing.explore.explore": "Exploration totale",
+    "routing.explore.balanced": "Équilibré",
+    "routing.explore.exploit": "Exploitation totale",
     "routing.explore.left": "Peaufiner",
     "routing.explore.right": "Chercher large",
     "routing.start": "Lancer le cheminement",
@@ -366,6 +372,9 @@ EN: dict[str, str] = {
         "clearance will apply everywhere."
     ),
     "rules.fixations": "Fixations",
+    "rules.edge": "Minimum clearance to sheet edge",
+    "rules.edge.help": "The cable does not run along a sheet edge: it would chafe "
+                       "its sleeve, and no fixation can be seated there.",
     "rules.pitch": "Maximum spacing between fixations",
     "rules.pitch.help": "Past this distance without a fixation, the agent must place a clamp.",
     "rules.parallel": "Allowed seating deviation",
@@ -410,6 +419,9 @@ EN: dict[str, str] = {
         "On the left, agents refine the best route found. On the right, they search wide, "
         "even starting over. The setting can be changed while running."
     ),
+    "routing.explore.explore": "Full exploration",
+    "routing.explore.balanced": "Balanced",
+    "routing.explore.exploit": "Full exploitation",
     "routing.explore.left": "Refine",
     "routing.explore.right": "Search wide",
     "routing.start": "Start routing",

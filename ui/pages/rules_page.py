@@ -116,7 +116,19 @@ class RulesPage(ctk.CTkScrollableFrame):
             value=float(saved.get("max_margin", 100.0)),
             unit="mm",
         )
-        self.f_max.pack(fill="x")
+        self.f_max.pack(fill="x", pady=(0, SPACE.MD))
+
+        # Le bord libre est un chant de tôle, pas une pièce : la distance à la
+        # structure est satisfaite juste à côté d'un bord, ce qui laissait le
+        # tracé le longer sans rien enfreindre.
+        self.f_edge = NumberField(
+            self.card_clearance.body,
+            label=t("rules.edge"),
+            help_text=t("rules.edge.help"),
+            value=float(saved.get("edge_clearance", 25.0)),
+            unit="mm",
+        )
+        self.f_edge.pack(fill="x")
 
         # --- distances renforcées par famille ---------------------------
         self.card_families = Card(
@@ -237,6 +249,7 @@ class RulesPage(ctk.CTkScrollableFrame):
         self.f_bend_factor.set(6.0)
         self.f_min.set(10.0)
         self.f_max.set(100.0)
+        self.f_edge.set(25.0)
         self.f_pitch.set(250.0)
         self.f_parallel.set(15.0)
         for name, field in self._family_fields.items():
@@ -284,6 +297,7 @@ class RulesPage(ctk.CTkScrollableFrame):
             "bend_radius_factor": self.f_bend_factor.get(6.0),
             "min_margin": self.f_min.get(10.0),
             "max_margin": self.f_max.get(100.0),
+            "edge_clearance": self.f_edge.get(25.0),
             "fixation_pitch": self.f_pitch.get(250.0),
             "fixation_parallel_tol": self.f_parallel.get(15.0),
             "crabe_stl_path": self.f_clamp_model.get(),
@@ -346,6 +360,7 @@ class RulesPage(ctk.CTkScrollableFrame):
         self.f_bend_factor.set_label(t("rules.bend_factor"), t("rules.bend_factor.help"))
         self.f_min.set_label(t("rules.clearance.min"), t("rules.clearance.min.help"))
         self.f_max.set_label(t("rules.clearance.max"), t("rules.clearance.max.help"))
+        self.f_edge.set_label(t("rules.edge"), t("rules.edge.help"))
         self.f_pitch.set_label(t("rules.pitch"), t("rules.pitch.help"))
         self.f_parallel.set_label(t("rules.parallel"), t("rules.parallel.help"))
         self.f_clamp_model.set_label(t("rules.clamp_model"), t("rules.clamp_model.help"))

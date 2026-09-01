@@ -126,6 +126,19 @@ RULE_CATALOG: tuple[RuleInfo, ...] = (
         "clearance",
     ),
     RuleInfo(
+        "edge_clearance",
+        "Distance minimale au bord de tôle",
+        "Minimum clearance to sheet edge",
+        "Le câble ne longe pas un bord libre de la structure. Un chant de tôle "
+        "use la gaine, et surtout ne peut recevoir aucune fixation : longer un "
+        "bord, c'est router là où rien ne tiendra le faisceau.",
+        "The cable does not run along a free edge of the structure. A sheet "
+        "edge chafes the sleeve and, above all, can take no fixation: routing "
+        "along an edge means routing where nothing will hold the harness.",
+        Severity.MAJOR,
+        reward_key="edge",
+    ),
+    RuleInfo(
         "free_span",
         "Pas de traversée dans le vide",
         "No unsupported crossing",
@@ -342,6 +355,9 @@ class RoutingRules:
     fixation_pitch_mm: float = 250.0
     #: Écart angulaire toléré entre l'embase d'un crabe et la structure, en degrés.
     fixation_parallel_tol_deg: float = 15.0
+    #: Distance minimale à un bord libre de la structure, en mm. Un bord libre
+    #: est une arête portée par une seule face : le chant de la tôle.
+    edge_clearance_mm: float = 25.0
     #: Longueur maximale d'une traversée à vide, en mm. Par défaut, le pas de
     #: fixation : au-delà, plus rien ne tient le câble.
     max_free_span_mm: float | None = None
@@ -523,6 +539,7 @@ def evaluate_route(
     n_crossings: int = 0,
     clamp_arc_positions=None,
     clamp_tilt_deg=None,
+    edge_distances=None,
 ) -> RouteReport:
     """Confronte une trajectoire aux règles d'intégration.
 
@@ -538,6 +555,9 @@ def evaluate_route(
         clamp_arc_positions: abscisses curvilignes (mm) des fixations posées.
         clamp_tilt_deg: écart angulaire de chaque crabe vis-à-vis de la
             structure, en degrés.
+        edge_distances: distance de chaque point au bord libre le plus proche
+            (``None`` = non mesuré ; la règle de bord est alors ignorée plutôt
+            que supposée bonne).
 
     Returns:
         Un :class:`RouteReport` prêt à afficher et à comparer.
@@ -691,6 +711,48 @@ def evaluate_route(
     else:
         kpis.setdefault("n_margin_violations", 0)
         kpis.setdefault("longest_free_span_mm", 0.0)
+
+    # ------------------------------------------------------------------
+    # 2 bis. Bords libres de la structure
+    # ------------------------------------------------------------------
+    # Indépendant de la distance à la structure, et c'est tout le sujet : le
+    # long d'un bord, la matière est bien là, juste à côté. La règle de
+    # distance est donc satisfaite alors que le câble rase un chant.
+    if edge_distances is not None and len(edge_distances):
+        edges = np.asarray(edge_distances, dtype=np.float64)
+        finite = edges[np.isfinite(edges)]
+        closest = float(finite.min()) if len(finite) else float("inf")
+        n_edge = int(np.count_nonzero(edges < rules.edge_clearance_mm))
+        kpis["min_edge_distance_mm"] = closest
+        kpis["n_edge_violations"] = n_edge
+        checks.append(
+            RuleCheck(
+                rule_id="edge_clearance",
+                label_fr="Distance minimale au bord de tôle",
+                label_en="Minimum clearance to sheet edge",
+                passed=n_edge == 0,
+                value=closest,
+                limit=float(rules.edge_clearance_mm),
+                unit="mm",
+                severity=Severity.MAJOR,
+                detail_fr=(
+                    "Le câble reste à l'écart des chants de tôle."
+                    if n_edge == 0
+                    else f"{n_edge} point(s) à moins de "
+                         f"{_fmt(rules.edge_clearance_mm)} d'un bord libre : "
+                         "rien ne peut y tenir le faisceau."
+                ),
+                detail_en=(
+                    "The cable stays clear of sheet edges."
+                    if n_edge == 0
+                    else f"{n_edge} point(s) closer than "
+                         f"{_fmt(rules.edge_clearance_mm)} to a free edge: "
+                         "nothing can hold the harness there."
+                ),
+            )
+        )
+    else:
+        kpis.setdefault("n_edge_violations", 0)
 
     # ------------------------------------------------------------------
     # 4. Rayon de cintrage
