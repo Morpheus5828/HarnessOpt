@@ -1,6 +1,5 @@
 J'aimerais te faire remonter quelques soucis utilisateur que j'ai pu rencontrer lors de la prise en main.
-- Quand je sélectionne l'option 'le long de la surface' ça ne met pas la distance géodésique de base
-- Quand je fournis un dossier avec les clamps, comment savoir combien ont été scanner et trouvé sur le maillage ? Je voudrais les voir apparaitre sur la vue 3D stp
-- Concernant ces fixations je veux avoir la possibilité ou non pendant le cheminement de les prendre durant le rooting, si oui alors la distance géo desic ou autre DOIT passer par ces fixations
-- Les crabes doivent être poser et placer durant le rooting par les agents, par après.
- 
+- Lors du cheminement, je vois toujours les sphères au lieu de voir les crabes comment zone de fixation.
+- De manières générale en utilisant la notion de distance avant d'effectuer le décalage des points est peu être pas si pertinent que ça car dès le départ je suis en face à des clashs.
+En effet en utilisant la distance géodésique je passe par le maillage de l'environnement et donc je suis en interférence avec lui. Peux être serait il intéressant de trouver un autre moyen.
+- Je n'ai pas de print cli sur les fixation trouvé lors du scan, je pense que l'appli ne les trouve pas. Peux tu regarder dans le code de mon ancienne application ? Je vais te fournir le code dans un dossier appelé old code.
