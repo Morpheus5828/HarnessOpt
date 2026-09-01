@@ -29,7 +29,26 @@ from dataclasses import dataclass
 
 import numpy as np
 
-__all__ = ["Crossing", "choose_crossings", "comb_center", "describe"]
+__all__ = [
+    "Crossing",
+    "choose_crossings",
+    "comb_center",
+    "comb_name",
+    "default_selection",
+    "describe",
+    "detour_ratio",
+    "filter_combs",
+    "in_routing_zone",
+    "DEFAULT_ZONE_FACTOR",
+]
+
+#: Rallongement relatif toléré pour aller chercher un peigne. Le couloir de
+#: cheminement est l'ellipsoïde de foyers A et B : un peigne y est admis si le
+#: détour qu'il impose — ``|PA| + |PB|`` — ne dépasse pas ce multiple de la
+#: distance directe ``|AB|``. 1,25 laisse un écart latéral d'environ 37 % de
+#: la longueur du trajet, ce qui couvre largement un cheminement qui serpente,
+#: et écarte les fixations reconnues ailleurs dans la maquette.
+DEFAULT_ZONE_FACTOR = 1.25
 
 
 @dataclass(frozen=True)
@@ -68,13 +87,75 @@ def comb_center(passages) -> np.ndarray:
     return np.mean(centers, axis=0) if centers else np.zeros(3)
 
 
+def comb_name(passages) -> str:
+    """Nom du peigne qui porte ces encoches."""
+    for passage in passages:
+        name = str(getattr(passage, "comb", "") or "")
+        if name:
+            return name
+    return "?"
+
+
+def detour_ratio(start, goal, point) -> float:
+    """Rallongement relatif imposé par un crochet jusqu'à ``point``.
+
+    Vaut 1 sur le segment A–B, et croît avec l'écart. Renvoie ``0`` quand A et
+    B sont confondus : le couloir n'a alors aucun sens, et prétendre le
+    contraire écarterait tout.
+    """
+    a = np.asarray(start, dtype=np.float64)
+    b = np.asarray(goal, dtype=np.float64)
+    p = np.asarray(point, dtype=np.float64)
+    direct = float(np.linalg.norm(b - a))
+    if direct < 1e-9:
+        return 0.0
+    return (float(np.linalg.norm(p - a)) + float(np.linalg.norm(p - b))) / direct
+
+
+def in_routing_zone(start, goal, point, factor: float = DEFAULT_ZONE_FACTOR) -> bool:
+    """Le point est-il dans le couloir de cheminement ?"""
+    if not factor or factor <= 0:
+        return True
+    return detour_ratio(start, goal, point) <= float(factor)
+
+
+def filter_combs(start, goal, combs, factor: float = DEFAULT_ZONE_FACTOR) -> list:
+    """Écarte les peignes hors du couloir de cheminement.
+
+    Le détecteur balaie **toute** la maquette : il reconnaît aussi bien les
+    peignes qui jalonnent le trajet que ceux montés à l'autre bout de
+    l'appareil. Les emprunter tous obligeait le câble à aller les chercher,
+    donc à ne plus s'arrêter là où il devait. Un peigne est situé par son
+    centre, comme partout ailleurs ici.
+    """
+    kept = []
+    for comb in combs:
+        passages = list(comb)
+        if passages and in_routing_zone(start, goal, comb_center(passages), factor):
+            kept.append(passages)
+    return kept
+
+
+def default_selection(combs, crossings) -> dict:
+    """Choix proposé à l'utilisateur : l'encoche que l'application retiendrait.
+
+    Le dictionnaire va du nom du peigne à l'index de l'encoche, ou à ``None``
+    pour un peigne qu'on n'emprunte pas. C'est la forme qu'attend
+    :func:`choose_crossings`, de sorte que ce que l'utilisateur voit proposé
+    est exactement ce qu'il peut modifier.
+    """
+    retained = {c.comb: c.passage.index for c in crossings}
+    return {comb_name(comb): retained.get(comb_name(comb)) for comb in combs if list(comb)}
+
+
 def _endpoints(passage, flipped: bool):
     p_in = np.asarray(passage.p_in, dtype=np.float64)
     p_out = np.asarray(passage.p_out, dtype=np.float64)
     return (p_out, p_in) if flipped else (p_in, p_out)
 
 
-def choose_crossings(start, goal, combs) -> list:
+def choose_crossings(start, goal, combs, zone_factor: float = DEFAULT_ZONE_FACTOR,
+                     selection=None) -> list:
     """Une encoche par peigne, dans l'ordre et le sens les plus courts.
 
     Args:
@@ -82,16 +163,36 @@ def choose_crossings(start, goal, combs) -> list:
         combs: un itérable de peignes, chaque peigne étant la liste de ses
             passages. Un peigne vide est ignoré ; un peigne à une seule
             encoche n'offre que le choix du sens.
+        zone_factor: largeur du couloir de cheminement (voir
+            :data:`DEFAULT_ZONE_FACTOR`). ``0`` ou ``None`` désactive le
+            filtrage et reprend tous les peignes détectés.
+        selection: choix explicite de l'utilisateur, du nom du peigne vers
+            l'index de l'encoche voulue — ou ``None`` pour un peigne à ne pas
+            emprunter. Un peigne absent du dictionnaire est laissé au calcul.
 
     Returns:
-        La liste des :class:`Crossing` retenus, dans l'ordre du trajet. Un
-        peigne détecté est toujours emprunté : l'utilisateur a demandé à passer
-        par les fixations, ce n'est pas le rôle de cette fonction d'en écarter.
+        La liste des :class:`Crossing` retenus, dans l'ordre du trajet. Le sens
+        de traversée reste calculé même sur une encoche imposée : il n'a aucune
+        conséquence physique, et l'utilisateur n'a pas à s'en occuper.
     """
     start = np.asarray(start, dtype=np.float64)
     goal = np.asarray(goal, dtype=np.float64)
 
-    groups = [list(comb) for comb in combs if len(list(comb))]
+    groups = filter_combs(start, goal, combs, zone_factor)
+    if selection is not None:
+        wanted = dict(selection)
+        kept = []
+        for group in groups:
+            name = comb_name(group)
+            if name not in wanted:
+                kept.append(group)
+                continue
+            index = wanted[name]
+            if index is None:
+                continue          # peigne écarté par l'utilisateur
+            chosen = [p for p in group if p.index == index]
+            kept.append(chosen or group)
+        groups = kept
     if not groups:
         return []
 

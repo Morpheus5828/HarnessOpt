@@ -285,45 +285,34 @@ class AppWindow(ctk.CTk):
 
     # -- barre d'état ---------------------------------------------------------
 
-    def ask_use_fixations(self, scan_result, default: bool = True) -> bool:
-        """Demande si le câble doit emprunter les fixations reconnues.
+    def ask_fixation_choice(self, combs, selection=None, scan_message="",
+                            on_change=None):
+        """Demande par quelle encoche passer, peigne par peigne.
 
         La question arrive une fois le scan terminé et les passages déjà
         dessinés en 3D : l'utilisateur répond en voyant ce dont on parle,
-        plutôt que sur une liste de coordonnées.
+        plutôt que sur une liste de coordonnées. Chaque changement se répercute
+        aussitôt sur la vue, avant même de valider.
+
+        Returns:
+            Le dictionnaire ``nom de peigne -> index d'encoche`` retenu, ou
+            ``None`` si rien n'est emprunté — fermer la fenêtre, tout ignorer
+            et n'avoir plus rien à emprunter reviennent au même.
         """
-        lang = self.t.lang
-        english = self.t.is_english
+        from ui.widgets.fixation_picker import FixationPicker
 
-        detail = scan_result.message(lang)
-        lines = [passage.format(lang, number=n)
-                 for n, passage in enumerate(scan_result.passages[:6], start=1)]
-        if scan_result.n_passages > 6:
-            lines.append("…")
-
-        if english:
-            question = (
-                f"{detail}\n\n"
-                + "\n".join(lines)
-                + "\n\nShould the harness go through them?\n\n"
-                "Yes — the route crosses every notch and the agents keep it there.\n"
-                "No — the agents pick their own way."
-            )
-            title = "Existing fixations detected"
-        else:
-            question = (
-                f"{detail}\n\n"
-                + "\n".join(lines)
-                + "\n\nFaut-il faire passer le faisceau par ces fixations ?\n\n"
-                "Oui — le tracé traverse chaque encoche et les agents l'y maintiennent.\n"
-                "Non — les agents choisissent librement leur passage."
-            )
-            title = "Fixations existantes détectées"
-
+        if not combs:
+            return None
         try:
-            return bool(messagebox.askyesno(title, question, default="yes" if default else "no"))
+            picker = FixationPicker(
+                self, combs, selection=selection, lang=self.t.lang,
+                on_change=on_change, scan_message=scan_message,
+            )
+            return picker.ask()
         except Exception:
-            return default
+            # Sans fenêtre utilisable, on retombe sur ce que l'application
+            # proposait : un choix par défaut vaut mieux qu'un lancement avorté.
+            return dict(selection) if selection else None
 
     def set_status(self, message: str, tone: str = "neutral"):
         theme = current()
