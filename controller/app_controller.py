@@ -29,6 +29,7 @@ import numpy as np
 from core import paths
 from core import diagnostics, fixation_scan
 from core.passage_route import (
+    DEFAULT_ZONE_FACTOR as ZONE_FACTOR,
     choose_crossings,
     default_selection,
     describe as describe_crossings,
@@ -60,6 +61,11 @@ PASSAGE_MARKER_FACTOR = 0.5
 
 #: Couleur du segment qui joint p_in à p_out sur une encoche empruntée.
 PASSAGE_SEGMENT_COLOR = "#1E9E5A"
+
+#: Nombre maximal de poignées d'édition posées sur un tracé. Une par point
+#: serait illisible sur un faisceau de cinquante points, et impossible à
+#: saisir : deux poignées voisines se recouvriraient.
+MAX_HANDLES = 14
 
 #: Cadence de rafraîchissement de l'interface pendant le calcul, en ms.
 REFRESH_RUNNING_MS = 250
@@ -106,6 +112,14 @@ class AppController:
         #: Encoche retenue par peigne, telle que l'utilisateur l'a validée.
         #: ``None`` = aucune fixation empruntée.
         self.fixation_selection = None
+        #: Édition manuelle (BETA) : poignées posées sur le tracé.
+        self.manual_editing = False
+        #: Points imposés à la main, par rang de poignée.
+        self.pinned_points: dict = {}
+        self._handle_indices: list = []
+        self._initial_path = None
+        #: Quoi faire d'un clic sur une encoche. Posé le temps du choix.
+        self._pick_handler = None
 
     # ==================================================================
     # Étape 1 : extraction
@@ -386,6 +400,10 @@ class AppController:
                     "crabe_min_spacing": rules.fixation_pitch_mm,
                     "crabe_stl_path": rule_values.get("crabe_stl_path", ""),
                     "tube_radius": rules.harness.radius_mm,
+                    # Couloir de cheminement : le même pour écarter les peignes
+                    # hors zone et pour retenir les trajectoires. Deux notions
+                    # de « zone » finiraient par diverger.
+                    "zone_factor": ZONE_FACTOR,
                     "existing_crabes": [],
                 }
             )
@@ -400,6 +418,11 @@ class AppController:
             # Analyse des fixations déjà montées, avant tout cheminement : les
             # agents doivent partir de ce qui existe plutôt que d'en reposer
             # par-dessus. Un scan impossible n'interrompt jamais le lancement.
+            # La vue 3D s'ouvre d'elle-même : le choix des encoches se fait
+            # dedans, et poser la question devant une fenêtre fermée
+            # reviendrait à demander à l'utilisateur d'arbitrer à l'aveugle.
+            self._post(self._open_viewer_window)
+
             self._post(self.view.set_status, self.t("routing.prepare.scan"), "info")
             # On passe la maquette déjà chargée, pas seulement son chemin : la
             # fusion est enregistrée en ``.vtk``, un format que le détecteur ne
@@ -485,6 +508,7 @@ class AppController:
 
             self._post(self.view.set_status, self.t("routing.prepare.path"), "info")
             waypoints = self._build_initial_path(mesh, rules, values)
+            self._initial_path = waypoints
             if waypoints is None:
                 self.is_scanning = False
                 self._post(self.view.pages[2].set_running_state, "idle")
@@ -889,6 +913,8 @@ class AppController:
                 on_status=self._on_viewer_status,
                 t=lambda key, default="": self.t(key) or default,
             )
+            self.viewer.set_on_pick(self._on_viewer_pick)
+            self.viewer.set_on_handle_move(self._on_handle_moved)
             self.viewer.start()
 
         if self.viewer.mode == MODE_UNAVAILABLE:
@@ -945,11 +971,39 @@ class AppController:
         else:
             proposal = default_selection(combs, ())
 
+        working = dict(proposal)
+        picker = {"widget": None}
+
         def preview(selection):
             """Aperçu 3D du choix en cours, avant même de valider."""
+            working.clear()
+            working.update(selection)
             self._draw_fixations(
                 scan_result, self._crossings_to_use(wanted, selection)
             )
+
+        def on_click(comb, index):
+            """Clic sur une encoche dans la vue 3D : elle devient la retenue.
+
+            Recliquer celle qui l'est déjà écarte le peigne — un peigne
+            n'accepte qu'une encoche, désigner c'est donc choisir, et le seul
+            autre état possible est « aucune ».
+            """
+            if comb not in working:
+                return
+            working[comb] = None if working.get(comb) == index else index
+            widget = picker["widget"]
+            if widget is not None:
+                # La liste déroulante suit le clic : les deux voies mènent au
+                # même choix, il ne doit pas y en avoir deux versions.
+                widget.choose(comb, working[comb])
+            else:
+                preview(dict(working))
+
+        # Le clic en 3D et la liste déroulante décrivent le même choix : on
+        # branche le premier le temps de la question, et on le débranche après.
+        self._publish_pick_targets(combs)
+        self._pick_handler = on_click
 
         def ask():
             try:
@@ -957,6 +1011,7 @@ class AppController:
                     combs, selection=proposal,
                     scan_message=scan_result.message(self.t.lang),
                     on_change=preview,
+                    on_ready=lambda widget: picker.__setitem__("widget", widget),
                 )
             except Exception:
                 return proposal
@@ -979,6 +1034,9 @@ class AppController:
             self._post(ask_on_ui)
             answered.wait(timeout=ASK_TIMEOUT_S)
 
+        # Le clic sur une encoche ne doit plus rien changer une fois la
+        # question tranchée : la scène reste cliquable, pas la décision.
+        self._pick_handler = None
         selection = answer["value"]
         # La page reflète la réponse : l'utilisateur retrouve son choix au même
         # endroit que s'il l'avait coché lui-même, et il est mémorisé.
@@ -1046,6 +1104,44 @@ class AppController:
                                       f"fixation_slot_{index}",
                                       color="#6C7A89", width=3)
         self.viewer.render()
+
+    def _open_viewer_window(self):
+        """Ouvre la fenêtre 3D si elle ne l'est pas déjà."""
+        if self.viewer is None or not self.viewer.is_available:
+            return
+        if not self.viewer.is_open:
+            self.viewer.open_window()
+            self.view.pages[2].set_detached(True)
+
+    def _publish_pick_targets(self, combs):
+        """Rend chaque encoche cliquable dans la vue 3D.
+
+        La cible est le **centre** de l'encoche, pas ses deux extrémités : un
+        clic vise une encoche, pas une entrée ou une sortie, et le sens de
+        traversée n'est de toute façon pas à la main de l'utilisateur.
+        """
+        if self.viewer is None or not self.viewer.is_available:
+            return
+        targets = [
+            ((passage.comb, passage.index), passage.center)
+            for comb in combs for passage in comb
+        ]
+        self.viewer.set_pick_targets(targets)
+
+    def _on_viewer_pick(self, key):
+        """Un clic dans la vue 3D a désigné une encoche.
+
+        Cliquer une encoche la retient pour son peigne ; recliquer celle qui
+        est déjà retenue écarte le peigne. C'est le geste minimal : un peigne
+        n'accepte qu'une encoche, donc désigner, c'est choisir.
+        """
+        if self._pick_handler is None:
+            return
+        try:
+            comb, index = key
+        except (TypeError, ValueError):
+            return
+        self._pick_handler(str(comb), int(index))
 
     @staticmethod
     def _fixation_body(fixation):
@@ -1138,13 +1234,19 @@ class AppController:
             return None
 
     def _on_viewer_status(self, mode: str, error: str | None):
-        from ui.viewer3d import MODE_EMBEDDED, MODE_STARTING, MODE_UNAVAILABLE
+        from ui.viewer3d import (
+            MODE_CLOSED, MODE_STARTING, MODE_UNAVAILABLE, MODE_WINDOW,
+        )
 
         if mode == MODE_STARTING:
             self.view.set_status(self.t("routing.view.starting"), "info")
-        elif mode == MODE_EMBEDDED:
-            self.view.set_status(self.t("routing.view.ready"), "ok")
-            self.view.pages[2].set_detached(self.viewer.is_detached if self.viewer else False)
+        elif mode in (MODE_CLOSED, MODE_WINDOW):
+            self.view.set_status(
+                self.t("routing.view.opened") if mode == MODE_WINDOW
+                else self.t("routing.view.closed"),
+                "ok",
+            )
+            self.view.pages[2].set_detached(self.viewer.is_open if self.viewer else False)
         elif mode == MODE_UNAVAILABLE:
             self.view.set_status(
                 f"{self.t('routing.view.unavailable')} {error}" if error
@@ -1169,6 +1271,114 @@ class AppController:
         detached = self.viewer.toggle_window()
         self._detached = detached
         self.view.pages[2].set_detached(detached)
+
+    def set_manual_editing(self, active: bool):
+        """Arme ou désarme les poignées d'édition manuelle (BETA).
+
+        Les points déjà imposés ne sont **pas** libérés en désarmant : ils ont
+        été posés délibérément, et les perdre au premier décochage ferait
+        recommencer tout le travail. « Libérer les points imposés » est une
+        action à part.
+        """
+        self.manual_editing = bool(active)
+        if self.viewer is None or not self.viewer.is_available:
+            self.view.set_status(self.t("routing.view.none"), "warn")
+            self.view.pages[2].set_manual_editing(False)
+            self.manual_editing = False
+            return
+        if not self.manual_editing:
+            self.viewer.clear_handles()
+            self.view.set_status(self.t("routing.view.edit.off"), "info")
+            return
+        if not self._refresh_handles():
+            self.view.set_status(self.t("routing.view.edit.none"), "warn")
+            return
+        self.view.set_status(self.t("routing.view.edit.on"), "ok")
+
+    def _refresh_handles(self) -> bool:
+        """Repose les poignées sur le tracé courant. Faux s'il n'y en a pas.
+
+        Une poignée par point serait illisible sur un faisceau de cinquante
+        points, et surtout impossible à saisir : on les échantillonne.
+        """
+        if self.viewer is None or not self.manual_editing:
+            return False
+        points = self._current_path()
+        if points is None or len(points) < 3:
+            self.viewer.clear_handles()
+            return False
+
+        import numpy as np
+
+        interior = np.asarray(points[1:-1], dtype=float)
+        step = max(1, int(np.ceil(len(interior) / MAX_HANDLES)))
+        self._handle_indices = list(range(1, len(points) - 1, step))
+        radius = max(8.0, self.rules.harness.radius_mm * 1.4 if self.rules else 20.0)
+        self.viewer.set_handles([list(points[i]) for i in self._handle_indices], radius)
+        return True
+
+    def _current_path(self):
+        """Tracé du meilleur agent, ou le tracé de départ avant tout calcul."""
+        best = None
+        if self.shared_state is not None:
+            with self.data_lock:
+                algos = dict(self.shared_state.get("algos") or {})
+            ranking = [name for name in algos]
+            if self._best_scores:
+                ranking.sort(key=lambda n: self._best_scores.get(n, float("inf")))
+            for name in ranking:
+                points = algos.get(name, {}).get("waypoints")
+                if points is not None and len(points) > 2:
+                    best = points
+                    break
+        if best is None:
+            best = self._initial_path
+        return best
+
+    def _on_handle_moved(self, index: int, point):
+        """Une poignée vient d'être déplacée : le point devient imposé.
+
+        La mécanique existe déjà — c'est celle des encoches. Un point imposé
+        est replacé à chaque itération puis retiré de ceux que l'agent peut
+        bouger : l'agent optimise donc autour de la décision de l'utilisateur
+        au lieu de la défaire.
+        """
+        if not self.manual_editing:
+            return
+        self.pinned_points[int(index)] = [float(c) for c in point]
+        self._publish_pinned()
+        self.view.set_status(self.t("routing.view.edit.pinned"), "ok")
+
+    def _publish_pinned(self):
+        """Transmet les points imposés aux agents, sans relancer le calcul."""
+        points = [list(p) for p in self.pinned_points.values()]
+        if self.shared_state is not None:
+            with self.data_lock:
+                self.shared_state["config"]["pinned_points"] = points
+        self._draw_pinned()
+
+    def _draw_pinned(self):
+        if self.viewer is None or not self.viewer.is_available:
+            return
+        self.viewer.remove_prefix("pinned_")
+        radius = max(6.0, self.rules.harness.radius_mm if self.rules else 18.0)
+        for index, point in enumerate(self.pinned_points.values()):
+            self.viewer.show_sphere(point, f"pinned_{index}",
+                                    radius=radius, color="#8E44AD")
+        self.viewer.render()
+
+    def clear_pinned_points(self):
+        """Libère les points imposés à la main.
+
+        Séparée du décochage à dessein : un point posé délibérément ne doit
+        pas disparaître parce qu'on range les poignées. Et l'inverse serait
+        pire — une contrainte qu'on ne peut plus retirer est un piège.
+        """
+        if not self.pinned_points:
+            return
+        self.pinned_points.clear()
+        self._publish_pinned()
+        self.view.set_status(self.t("routing.view.edit.off"), "info")
 
     # ==================================================================
     # Rafraîchissement de l'interface
@@ -1239,6 +1449,9 @@ class AppController:
             )
             changed = True
         if changed:
+            # Les poignées suivent le tracé : laissées où elles étaient, elles
+            # désigneraient un point que le câble a quitté.
+            self._refresh_handles()
             self.viewer.render()
 
     def _update_page(self, snapshot: dict, team: dict):

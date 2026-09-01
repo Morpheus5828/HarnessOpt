@@ -1093,3 +1093,69 @@ class TestFenetreDeConfirmationDesFixations:
             assert page.f_use_fixations.get() is True
         finally:
             page.f_use_fixations.var.set(True)
+
+
+class TestEditionManuelle:
+    """Édition manuelle (BETA) : la case, le bouton, et ce qu'ils commandent."""
+
+    def test_la_case_est_marquee_beta(self, app):
+        """Une fonction en rodage doit se présenter comme telle."""
+        assert "BETA" in app.pages[2].chk_edit.cget("text").upper()
+
+    def test_l_edition_n_est_pas_armee_par_defaut(self, app):
+        """Des poignées surgissant sans qu'on les demande gêneraient la lecture."""
+        assert app.pages[2].chk_edit.get() == 0
+
+    def test_la_case_commande_le_controleur(self, app, monkeypatch):
+        vus = []
+        monkeypatch.setattr(app.controller, "set_manual_editing", vus.append)
+        page = app.pages[2]
+        page.chk_edit.select()
+        page._on_edit_toggled()
+        try:
+            assert vus == [True]
+        finally:
+            page.chk_edit.deselect()
+
+    def test_liberer_les_points_est_atteignable(self, app, monkeypatch):
+        """Une contrainte qu'on ne peut plus retirer est un piège."""
+        appels = []
+        monkeypatch.setattr(app.controller, "clear_pinned_points",
+                            lambda: appels.append(1))
+        app.pages[2]._on_release_pinned()
+        assert appels == [1]
+
+    def test_l_etat_de_l_edition_se_reflete_sans_declencher(self, app, monkeypatch):
+        vus = []
+        monkeypatch.setattr(app.controller, "set_manual_editing", vus.append)
+        page = app.pages[2]
+        try:
+            page.set_manual_editing(True)
+            assert page.chk_edit.get() == 1
+            assert vus == [], "refléter n'est pas commander"
+        finally:
+            page.set_manual_editing(False)
+
+
+class TestVue3DUnique:
+    """La petite vue incrustée est supprimée : il n'en reste qu'une."""
+
+    def test_le_bouton_ouvre_la_vue_3d(self, app):
+        assert "3D" in app.pages[2].btn_detach.cget("text")
+
+    def test_le_bouton_dit_ce_qu_il_fera(self, app):
+        page = app.pages[2]
+        try:
+            page.set_detached(False)
+            ouvrir = page.btn_detach.cget("text")
+            page.set_detached(True)
+            fermer = page.btn_detach.cget("text")
+            assert ouvrir != fermer
+        finally:
+            page.set_detached(False)
+
+    def test_les_onglets_recuperent_la_hauteur(self, app):
+        """La 3D vivant ailleurs, conformité et courbes prennent la place."""
+        right = app.pages[2].tabs.master
+        assert right.grid_rowconfigure(4)["weight"] > 0
+        assert right.grid_rowconfigure(3)["weight"] == 0

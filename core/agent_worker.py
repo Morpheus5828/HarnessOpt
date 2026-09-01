@@ -25,6 +25,7 @@ from core.agent.tool import *
 
 from core import reward_terms as rwt
 from core.orchestrator import ROLES, BASE_WEIGHTS
+from core.passage_route import DEFAULT_ZONE_FACTOR
 from core.routing_rules import ClearanceModel, HarnessSpec, RoutingRules, evaluate_route
 
 
@@ -179,6 +180,18 @@ def algo_worker(
             mandatory_points = (
                 raw_mandatory[:usable].reshape(-1, 2, 3) if usable else None
             )
+            # Couloir de cheminement : la même ellipse que celle qui écarte
+            # les peignes hors zone, appliquée cette fois à chaque point.
+            # Points imposés à la main dans la vue 3D (édition BETA). Relus à
+            # chaque tour : l'utilisateur en pose et en libère en cours de
+            # calcul, sans relancer les agents.
+            raw_pinned = cfg.get("pinned_points") or []
+            pinned_points = (
+                np.asarray(raw_pinned, dtype=np.float32).reshape(-1, 3)
+                if len(raw_pinned) else None
+            )
+            zone_factor = float(cfg.get("zone_factor", DEFAULT_ZONE_FACTOR))
+            zone_weight = float(cfg.get("zone_weight", 90.0))
             exploration_noise = cfg["exploration_noise_start"]
             local_pts = int(cfg["initial_points"])
 
@@ -470,6 +483,12 @@ def algo_worker(
             # Les passages imposés sont replacés avant tout calcul : l'agent
             # travaille donc sur une trajectoire qui les respecte déjà.
             mandatory_locked = snap_passages(wp_current, mandatory_points)
+            # Un point posé à la main est une contrainte de même nature qu'une
+            # encoche : l'agent optimise autour de la décision de
+            # l'utilisateur au lieu de la défaire à l'itération suivante.
+            mandatory_locked = snap_mandatory_points(
+                wp_current, pinned_points, used=mandatory_locked
+            ) if pinned_points is not None else mandatory_locked
             if mandatory_locked:
                 new_waypoints = wp_current.copy()
 
@@ -807,6 +826,14 @@ def algo_worker(
                     weight=detour_weight, tolerance=detour_tolerance,
                 )[danger_indices]
 
+                # Couloir de cheminement : sans ce terme, rien ne retient un
+                # point au-delà de l'arrivée. Le détour, lui, ne juge que la
+                # longueur totale et dilue sa sanction sur tous les points.
+                R_zone = rwt.zone_penalty(
+                    candidate_full, point_A, point_B,
+                    factor=zone_factor, weight=zone_weight,
+                )[danger_indices]
+
                 # ==========================================================
                 # ⚖️ PONDÉRATION PAR LE RÔLE DE L'AGENT
                 # ==========================================================
@@ -845,6 +872,7 @@ def algo_worker(
                     + w_span * R_free_span
                     + w_fix * R_fixation
                     + w_length * R_detour
+                    + R_zone
                 )
 
                 r_det = {
@@ -863,6 +891,7 @@ def algo_worker(
                     "FreeSpan": float((w_span * R_free_span).mean()),
                     "Fixation": float((w_fix * R_fixation).mean()),
                     "Detour": float((w_length * R_detour).mean()),
+                    "Zone": float(R_zone.mean()),
                 }
                 local_reward = sum(r_det.values())
 
@@ -991,7 +1020,10 @@ def algo_worker(
             # Lissage, écrêtage et repli sur la meilleure solution ont pu tirer
             # le câble hors des encoches : on l'y remet. Les indices sont
             # recalculés, le raffinement adaptatif ayant pu en insérer.
-            snap_passages(smoothed_waypoints, mandatory_points)
+            snap_mandatory_points(
+                smoothed_waypoints, pinned_points,
+                used=snap_passages(smoothed_waypoints, mandatory_points),
+            )
 
             test_pts = get_segment_test_points(smoothed_waypoints, steps=10)
             with geom_lock:
@@ -1385,7 +1417,10 @@ def algo_worker(
             # Dernier épinglage : le raffinement adaptatif a pu insérer ou
             # retirer des points depuis le précédent, donc décaler les indices.
             # C'est cette trajectoire-ci qui est publiée et notée.
-            snap_passages(smoothed_waypoints, mandatory_points)
+            snap_mandatory_points(
+                smoothed_waypoints, pinned_points,
+                used=snap_passages(smoothed_waypoints, mandatory_points),
+            )
 
             # ==========================================================
             # 📋 RAPPORT DE CONFORMITÉ
