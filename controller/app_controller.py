@@ -379,9 +379,14 @@ class AppController:
             # agents doivent partir de ce qui existe plutôt que d'en reposer
             # par-dessus. Un scan impossible n'interrompt jamais le lancement.
             self._post(self.view.set_status, self.t("routing.prepare.scan"), "info")
+            # On passe la maquette déjà chargée, pas seulement son chemin : la
+            # fusion est enregistrée en ``.vtk``, un format que le détecteur ne
+            # sait pas relire — il rendrait un maillage vide sans rien dire, et
+            # ne trouverait donc jamais aucune fixation.
             scan_result = fixation_scan.scan(
                 self.extraction_summary.get("fusion_path") or paths.FUSED_MESH_PATH,
                 rule_values.get("clamps_folder", ""),
+                mesh=mesh,
             )
             self.scan_result = scan_result
             self._post(self.view.pages[2].show_fixation_scan, scan_result)
@@ -614,7 +619,16 @@ class AppController:
             # ne marche pas ».
             from core.surface_path import surface_path
 
-            result = surface_path(mesh, a, b, num_points=n_points)
+            # Le tracé est décollé de la structure avant d'être rendu. Sans
+            # cela il est *sur* la surface, donc en interférence sur toute sa
+            # longueur : les agents passeraient leurs premières centaines
+            # d'itérations à faire ce qu'un décalage géométrique fait d'un
+            # coup. La cible est prise dans le bas de la bande autorisée, le
+            # propre d'un chemin de surface étant de longer la structure.
+            band = rules.clearance.max_mm - rules.clearance.default_min_mm
+            target = rules.clearance.default_min_mm + 0.25 * max(band, 0.0)
+
+            result = surface_path(mesh, a, b, num_points=n_points, offset_mm=target)
             return (result.points, result.message(lang)) if result.success \
                 else (None, result.message(lang))
 
@@ -891,7 +905,16 @@ class AppController:
 
         radius = max(6.0, self.rules.harness.radius_mm if self.rules else 20.0)
         for index, fixation in enumerate(scan_result.fixations):
-            if fixation.position:
+            # La fixation est dessinée avec son propre modèle, recalé là où le
+            # détecteur l'a trouvée. Un repère symbolique ne dirait rien de son
+            # encombrement, qui est précisément ce qu'on cherche à voir.
+            body = self._fixation_body(fixation)
+            if body is not None:
+                self.viewer.show_mesh(body, f"fixation_body_{index}",
+                                      color="#8FA3B8", opacity=0.85, show_edges=False)
+            elif fixation.position:
+                # Modèle illisible : on montre au moins où elle se trouve,
+                # plutôt que de la faire disparaître de la vue.
                 self.viewer.show_sphere(
                     fixation.position, f"fixation_body_{index}",
                     radius=radius * 1.2, color="#8FA3B8",
@@ -905,6 +928,29 @@ class AppController:
             self.viewer.show_path([passage.p_in, passage.p_out],
                                   f"fixation_slot_{index}", color="#E5B300", width=9)
         self.viewer.render()
+
+    @staticmethod
+    def _fixation_body(fixation):
+        """Maillage de la fixation reconnue, recalé sur la maquette.
+
+        C'est ce que faisait déjà l'ancienne application : lire le STL du
+        modèle et lui appliquer la matrice de recalage rendue par l'ICP.
+        Renvoie ``None`` si le fichier est introuvable ou illisible — un
+        modèle absent ne doit pas faire disparaître le reste de la vue.
+        """
+        if not getattr(fixation, "is_drawable", False):
+            return None
+        try:
+            import numpy as np
+            import pyvista as pv
+
+            if not os.path.exists(fixation.file_path):
+                return None
+            mesh = pv.read(fixation.file_path)
+            mesh.transform(np.asarray(fixation.transform, dtype=float), inplace=True)
+            return mesh
+        except Exception:
+            return None
 
     def _draw_clamps(self, crabes):
         """Place les crabes posés par le meilleur agent, au fil du calcul.

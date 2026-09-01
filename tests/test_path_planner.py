@@ -310,7 +310,7 @@ class TestIntegrationControleur:
         Elle exige un chemin d'arêtes, dont une maquette faite de pièces
         séparées ne dispose jamais. Le chemin de surface franchit les
         intervalles par des sauts courts et longe la structure le reste du
-        temps : il doit donc rester proche du DMU, là où une corde s'en écarte.
+        temps : sa forme épouse le DMU, là où une corde l'ignore.
         """
         controller, view = self._controleur()
         points = controller._build_initial_path(
@@ -319,23 +319,37 @@ class TestIntegrationControleur:
         assert points is not None
         assert view.messages[-1][0] == "ok"
 
-        # Un chemin de surface colle au DMU ; c'est attendu, et c'est bien ce
-        # que demande « le long de la surface ».
-        assert clearances(dmu_disjoint, points).min() < 20.0
-
-        # …et surtout il n'est pas une ligne droite : la corde s'éloignerait.
+        # Il n'est pas une ligne droite : c'est bien la surface qu'il suit.
         droite = np.linspace(points[0], points[-1], len(points))
         assert np.abs(points - droite).max() > 1.0
 
-    def test_la_geodesique_reste_plus_proche_du_dmu_qu_une_corde(self, dmu_disjoint):
-        """Critère décisif : suivre la surface, ce n'est pas la traverser."""
+    def test_la_geodesique_longe_la_structure_sans_la_toucher(self, dmu_disjoint):
+        """Suivre la surface n'est pas la raser.
+
+        Un tracé posé *sur* le maillage est en interférence sur toute sa
+        longueur : les agents démarrent alors en clash et passent leurs
+        premières itérations à s'en extraire. Le chemin de surface est donc
+        décollé de la structure, tout en gardant sa forme.
+        """
         controller, view = self._controleur()
+        regles = self._regles()
         points = controller._build_initial_path(
-            dmu_disjoint, self._regles(), {"start_path": "geodesic", "initial_points": 48}
+            dmu_disjoint, regles, {"start_path": "geodesic", "initial_points": 48}
+        )
+        assert clearances(dmu_disjoint, points).min() >= regles.clearance.default_min_mm
+
+    def test_la_geodesique_respecte_la_distance_la_ou_une_corde_la_viole(self, dmu_disjoint):
+        """Critère décisif : la corde traverse la structure, pas le tracé."""
+        controller, view = self._controleur()
+        regles = self._regles()
+        points = controller._build_initial_path(
+            dmu_disjoint, regles, {"start_path": "geodesic", "initial_points": 48}
         )
         corde = np.linspace(points[0], points[-1], len(points))
-        assert (np.abs(clearances(dmu_disjoint, points)).mean()
-                < np.abs(clearances(dmu_disjoint, corde)).mean())
+        mini = regles.clearance.default_min_mm
+        assert clearances(dmu_disjoint, corde).min() < mini, \
+            "la corde tendue doit bien passer trop près : sinon le test ne prouve rien"
+        assert clearances(dmu_disjoint, points).min() >= mini
 
     def test_un_echec_interrompt_le_lancement(self, dmu_disjoint):
         """Le contrôleur ne doit pas démarrer les agents sur un chemin absent."""

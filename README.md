@@ -190,9 +190,31 @@ Le graphe est restreint à un corridor ellipsoïdal autour de A–B. Sur une
 maquette de 128 000 sommets, cela divise par dix-huit le temps d'un trajet
 court sans changer d'un millimètre le chemin trouvé.
 
-Un chemin de surface **colle à la structure** : c'est sa définition, et les
-agents devront l'en décoller. Si vous voulez partir directement dans la bande
-de distance visée, prenez la recherche dans l'espace libre.
+#### Longer la structure sans la raser
+
+Un chemin de surface, par définition, passe **sur** le maillage. Pris tel quel
+comme point de départ, il est donc en interférence sur toute sa longueur : les
+agents démarrent en clash et dépensent leurs premières centaines d'itérations à
+s'extraire d'une situation que le tracé initial leur a créée. Compter sur la
+seule pénalité de distance pour les en sortir, c'est leur faire payer un défaut
+qui n'est pas le leur.
+
+Le tracé est donc **décollé** avant d'être rendu. Chaque point est projeté sur
+la face la plus proche puis repoussé le long de sa normale jusqu'à la distance
+visée ; l'opération est répétée, car déplacer un point peut lui donner un
+nouveau plus proche voisin. La marge réellement obtenue est ensuite **remesurée
+sur le maillage** et annoncée dans le bandeau d'état : on ne se contente pas de
+la viser.
+
+La cible est `distance mini + 25 % de la bande` : à l'intérieur du domaine
+autorisé, mais pas collée à sa limite basse, où le moindre déplacement d'un
+agent la ferait franchir. Mesuré sur une sphère, les cibles de 5, 20 et 60 mm
+sont atteintes à moins d'un micron ; sur une maquette de pièces disjointes, le
+tracé de départ passe de « en interférence » à « conforme dès l'itération 0 ».
+
+Ce décalage ne change pas la **forme** du chemin — il suit toujours la
+structure. Si vous voulez au contraire ignorer la surface et partir droit dans
+la bande de distance, prenez la recherche dans l'espace libre.
 
 ### A\* pondéré, dont le glouton est un cas particulier
 
@@ -306,9 +328,16 @@ bandeau en haut de l'écran *Cheminement* annonce **combien de modèles ont ét�
 examinés et combien reconnus**, puis liste les passages imposés des peignes :
 le segment `p_in` → `p_out` par lequel le câble doit traverser chaque encoche.
 
-Ces fixations sont **dessinées dans la vue 3D** : un repère gris par fixation
-reconnue, une bille verte à l'entrée de chaque encoche, une rouge à la sortie,
-et le segment jaune que le câble doit emprunter. Rien ne les dessinait
+Ces fixations sont **dessinées dans la vue 3D avec leur propre géométrie** :
+le STL du modèle, recalé par la matrice que l'ICP a trouvée — ce que faisait
+déjà l'ancienne application. Un repère symbolique ne dirait rien de
+l'encombrement réel d'un peigne, qui est précisément ce que l'intégrateur doit
+juger à l'œil. Le détecteur rend le chemin du fichier et la matrice de
+recalage ; la mise en forme les laissait tomber, et il ne restait qu'un point à
+dessiner. S'y ajoutent une bille verte à l'entrée de chaque encoche, une rouge
+à la sortie, et le segment jaune que le câble doit emprunter. Un modèle
+introuvable ou illisible retombe sur une bille grise : mieux vaut un repère
+approximatif qu'une fixation disparue de la vue. Rien ne les dessinait
 auparavant — le viewer savait masquer les acteurs `clamp_`, mais aucun n'était
 jamais créé, et l'utilisateur n'avait aucun moyen de vérifier ce que le scan
 avait reconnu.
@@ -339,9 +368,42 @@ Répondre non annule tout : ni découpage du trajet, ni épinglage, ni même
 l'attraction par récompense — la liste des fixations n'est pas transmise aux
 agents. Un refus doit être un vrai refus.
 
+#### Ce que le scan raconte en console
+
+« Aucune fixation trouvée » et « le scan n'a jamais eu lieu » se ressemblent
+beaucoup vus de l'interface, et pas du tout une fois qu'il faut comprendre
+pourquoi. Le scan journalise donc chacune de ses décisions : le dossier de
+modèles retenu, le fichier de maquette réellement analysé, la liste nominative
+des modèles cherchés, puis fixation par fixation le score de recalage, la
+position et chaque passage `p_in`/`p_out`.
+
+```
+======================================================================
+SCAN DES FIXATIONS EXISTANTES
+======================================================================
+📁 Dossier des modèles : /home/…/clamps
+📐 Maquette réexportée pour le détecteur : /home/…/fusion/temp_for_detection.stl
+🌍 Maquette analysée : /home/…/fusion/temp_for_detection.stl
+🔎 2 modèle(s) STL à rechercher :
+   • XA453420_peigne.stl
+   • clip.STL
+```
+
+**Le scan analyse la maquette chargée, pas un fichier.** L'étape d'extraction
+enregistre la fusion en `.vtk` ; Open3D ne lit pas ce format et rend un
+maillage **vide sans lever d'erreur**. Le détecteur comparait donc les modèles
+à un environnement inexistant et ne reconnaissait évidemment rien — en
+apparence, un scan qui tourne et ne trouve jamais rien. La maquette déjà en
+mémoire est désormais réexportée en STL avant le scan : ce qui est analysé est
+exactement ce que parcourent les agents, quel que soit le format dans lequel la
+fusion a été rangée. À défaut de maillage en mémoire, un fichier d'un format
+non lisible est converti plutôt qu'envoyé tel quel.
+
 Le détecteur repose sur Open3D. Sans lui, le scan ne plante pas : il dit
 pourquoi il n'a pas eu lieu, et le cheminement continue sans fixations
-préexistantes.
+préexistantes. Cinq causes d'abandon sont distinguées et nommées : dossier non
+renseigné, dossier sans aucun STL, maquette illisible, Open3D absent, scan en
+erreur — cette dernière recopiant la trace d'exécution en console.
 
 ### Les crabes posés par les agents
 

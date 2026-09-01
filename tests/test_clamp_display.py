@@ -286,3 +286,95 @@ def test_les_anciens_crabes_sont_effaces(stl_path):
                              crabe(seat=(300.0, 0.0, 0.0))])
     controller._draw_clamps([crabe(seat=(0.0, 0.0, 0.0))])
     assert set(controller.viewer.actors) == {"clamp_0"}
+
+
+# ----------------------------------------------------------------------
+# Fixations reconnues : leur géométrie, pas une sphère
+# ----------------------------------------------------------------------
+
+def fixation_reconnue(file_path="", transform=(), position=(0.0, 0.0, 0.0)):
+    from core.fixation_scan import DetectedFixation
+
+    return DetectedFixation(
+        name="XA453420.stl", position=position, score=0.9,
+        file_path=file_path, transform=transform,
+    )
+
+
+def matrice(translation=(0.0, 0.0, 0.0)):
+    m = np.eye(4)
+    m[:3, 3] = translation
+    return tuple(tuple(row) for row in m)
+
+
+def test_le_detecteur_donne_de_quoi_dessiner_la_fixation():
+    """Sans le fichier ni le recalage, il ne resterait qu'un point."""
+    from core.fixation_scan import summarise
+
+    fixation = summarise([{
+        "name": "a.stl", "position": [1.0, 2.0, 3.0], "score": 0.8,
+        "file_path": "/modeles/a.stl", "transform": np.eye(4).tolist(),
+    }]).fixations[0]
+
+    assert fixation.file_path == "/modeles/a.stl"
+    assert len(fixation.transform) == 4
+    assert fixation.is_drawable
+
+
+def test_une_fixation_sans_modele_n_est_pas_dessinable():
+    from core.fixation_scan import summarise
+
+    fixation = summarise([{"name": "a.stl", "position": [0, 0, 0]}]).fixations[0]
+    assert not fixation.is_drawable
+
+
+def test_la_fixation_est_dessinee_avec_sa_geometrie(stl_path):
+    pytest.importorskip("pyvista", reason="pyvista non installé")
+
+    corps = AppController._fixation_body(fixation_reconnue(stl_path, matrice()))
+    assert corps is not None
+    assert corps.n_points > 0, "c'est un maillage, pas un point"
+
+
+def test_la_fixation_est_recalee_la_ou_l_ICP_l_a_trouvee(stl_path):
+    pytest.importorskip("pyvista", reason="pyvista non installé")
+
+    corps = AppController._fixation_body(
+        fixation_reconnue(stl_path, matrice((100.0, 0.0, 0.0)))
+    )
+    centre = np.asarray(corps.center)
+    assert abs(centre[0] - 100.0) < 1e-3, "le recalage doit être appliqué"
+
+
+def test_un_modele_absent_ne_leve_pas(tmp_path):
+    pytest.importorskip("pyvista", reason="pyvista non installé")
+
+    absent = str(tmp_path / "jamais_ecrit.stl")
+    assert AppController._fixation_body(fixation_reconnue(absent, matrice())) is None
+
+
+def test_sans_recalage_on_ne_dessine_pas_de_geometrie(stl_path):
+    assert AppController._fixation_body(fixation_reconnue(stl_path, ())) is None
+
+
+def test_une_fixation_indessinable_reste_reperee_par_une_sphere(stl_path):
+    """Un modèle illisible ne doit pas faire disparaître la fixation de la vue."""
+    from core.fixation_scan import ScanResult
+
+    controller = _controleur(stl_path)
+    controller._draw_fixations(ScanResult(
+        fixations=[fixation_reconnue("", (), position=(5.0, 6.0, 7.0))]
+    ))
+    assert controller.viewer.actors["fixation_body_0"] == (5.0, 6.0, 7.0)
+
+
+def test_une_fixation_reconnue_est_dessinee_en_maillage(stl_path):
+    pytest.importorskip("pyvista", reason="pyvista non installé")
+    from core.fixation_scan import ScanResult
+
+    controller = _controleur(stl_path)
+    controller._draw_fixations(ScanResult(
+        fixations=[fixation_reconnue(stl_path, matrice())]
+    ))
+    corps = controller.viewer.actors["fixation_body_0"]
+    assert hasattr(corps, "n_points"), "on attend un maillage, pas un centre"
