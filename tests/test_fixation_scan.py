@@ -230,3 +230,139 @@ def test_une_numerotation_continue_peut_etre_imposee():
 def test_la_numerotation_continue_marche_aussi_en_anglais():
     passage = fs.summarise([raw_comb(n_passages=1)]).passages[0]
     assert "no. 7" in passage.format("EN", number=7)
+
+
+# ----------------------------------------------------------------------
+# Traçabilité en console
+# ----------------------------------------------------------------------
+
+def journal(*args, **kwargs):
+    """Un log qui garde ses lignes, pour vérifier ce que le scan raconte."""
+    lignes = []
+    return lignes, lignes.append
+
+
+def test_un_dossier_absent_le_dit_en_console():
+    lignes, log = journal()
+    fs.scan("scene.stl", "", log=log)
+    assert any("Dossier de fixations absent" in ligne for ligne in lignes)
+
+
+def test_le_scan_annonce_la_maquette_et_les_modeles(tmp_path, monkeypatch):
+    """« Aucune fixation trouvée » doit être distinguable de « pas de scan »."""
+    scene = tmp_path / "scene.stl"
+    scene.write_text("solid s\nendsolid s\n")
+    clamps = tmp_path / "clamps"
+    clamps.mkdir()
+    for name in ("a.stl", "b.stl"):
+        (clamps / name).write_text("solid s\nendsolid s\n")
+
+    lignes, log = journal()
+    monkeypatch.setattr(fs, "_model_files", lambda folder: sorted(
+        str(p) for p in (clamps).glob("*.stl")))
+    fs.scan(str(scene), str(clamps), log=log)
+
+    texte = "\n".join(lignes)
+    assert str(scene) in texte, "la maquette réellement scannée doit être nommée"
+    assert "2 modèle(s)" in texte
+    assert "a.stl" in texte and "b.stl" in texte
+
+
+def test_un_dossier_sans_modele_est_une_raison_a_part(tmp_path):
+    """Un dossier vide n'est pas « zéro fixation » : il n'y a rien à chercher."""
+    scene = tmp_path / "scene.stl"
+    scene.write_text("solid s\nendsolid s\n")
+    clamps = tmp_path / "vide"
+    clamps.mkdir()
+
+    lignes, log = journal()
+    result = fs.scan(str(scene), str(clamps), log=log)
+    assert result.skipped_reason == fs.NO_MODELS
+    assert result.message("FR").strip() and result.message("EN").strip()
+    assert any("Aucun modèle" in ligne for ligne in lignes)
+
+
+def test_le_recapitulatif_detaille_chaque_fixation():
+    lignes, log = journal()
+    result = fs.summarise([raw_comb(n_passages=2)], scanned_files=4)
+    fs._report(result, log)
+
+    texte = "\n".join(lignes)
+    assert "XA453420_peigne.stl" in texte
+    assert "p_in" in texte and "p_out" in texte
+    assert texte.count("p_in") == 2, "un passage par ligne"
+
+
+def test_le_recapitulatif_signale_une_fixation_non_dessinable():
+    lignes, log = journal()
+    fs._report(fs.summarise([raw_clip()]), log)
+    assert any("non réaffichable" in ligne for ligne in lignes)
+
+
+def test_un_echec_de_scan_est_journalise(tmp_path, monkeypatch):
+    scene = tmp_path / "scene.stl"
+    scene.write_text("solid s\nendsolid s\n")
+    pytest.importorskip("open3d", reason="Open3D non installé, cas déjà couvert")
+
+    import core.path_managment.fixation_detection as detection
+
+    monkeypatch.setattr(detection, "run_detection_for_agent",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boum")))
+    lignes, log = journal()
+    fs.scan(str(scene), str(tmp_path), log=log)
+    assert any("boum" in ligne for ligne in lignes)
+
+
+# ----------------------------------------------------------------------
+# Maquette lisible par le détecteur
+# ----------------------------------------------------------------------
+
+def test_un_stl_est_donne_tel_quel(tmp_path):
+    scene = tmp_path / "scene.stl"
+    scene.write_text("solid s\nendsolid s\n")
+    assert fs.scene_for_detection(str(scene), log=lambda *a: None) == str(scene)
+
+
+def test_une_maquette_en_memoire_prime_sur_le_chemin(tmp_path, monkeypatch):
+    """C'est la géométrie parcourue par les agents qui doit être scannée."""
+    trimesh = pytest.importorskip("trimesh")
+    cible = tmp_path / "temp_for_detection.stl"
+    monkeypatch.setattr(fs, "_scene_export_path", lambda: str(cible))
+
+    scene = tmp_path / "scene.stl"
+    scene.write_text("solid s\nendsolid s\n")
+    mesh = trimesh.creation.box(extents=(10.0, 10.0, 10.0))
+
+    obtenu = fs.scene_for_detection(str(scene), mesh=mesh, log=lambda *a: None)
+    assert obtenu == str(cible)
+    assert trimesh.load(obtenu).faces.shape[0] == 12
+
+
+def test_un_vtk_est_converti_car_le_detecteur_ne_le_lit_pas(tmp_path, monkeypatch):
+    """Open3D ne lit pas le ``.vtk`` : il rendrait un maillage vide en silence."""
+    pv = pytest.importorskip("pyvista")
+    trimesh = pytest.importorskip("trimesh")
+
+    source = tmp_path / "clipped_obstacles.vtk"
+    pv.wrap(trimesh.creation.box(extents=(10.0, 10.0, 10.0))).save(str(source))
+
+    cible = tmp_path / "temp_for_detection.stl"
+    monkeypatch.setattr(fs, "_scene_export_path", lambda: str(cible))
+
+    obtenu = fs.scene_for_detection(str(source), log=lambda *a: None)
+    assert obtenu == str(cible)
+    assert obtenu.lower().endswith(fs.DETECTOR_SUFFIXES)
+    assert trimesh.load(obtenu).faces.shape[0] == 12
+
+
+def test_une_maquette_illisible_ne_leve_pas(tmp_path):
+    source = tmp_path / "maquette.inconnu"
+    source.write_text("ceci n'est pas un maillage")
+    assert fs.scene_for_detection(str(source), log=lambda *a: None) is None
+
+
+def test_le_vtk_de_la_fusion_n_est_pas_lisible_par_le_detecteur():
+    """Le garde-fou du bug d'origine : la fusion est écrite dans ce format-là."""
+    from core import paths
+
+    assert not str(paths.FUSED_MESH_PATH).lower().endswith(fs.DETECTOR_SUFFIXES)

@@ -93,6 +93,11 @@ class SurfacePathResult:
     surface_length_mm: float = 0.0
     #: Nombre de sommets retenus dans le graphe (indicateur de coût).
     graph_nodes: int = 0
+    #: Distance minimale au DMU après décalage, en mm. Mesurée contre le
+    #: maillage réel, pas déduite du décalage demandé.
+    min_clearance_mm: float = 0.0
+    #: Décalage effectivement appliqué, en mm (0 = chemin resté sur la surface).
+    offset_mm: float = 0.0
 
     @property
     def total_length_mm(self) -> float:
@@ -111,21 +116,23 @@ class SurfacePathResult:
             return table.get(self.reason, self.reason)
 
         if english:
-            if not self.n_bridges:
-                return (f"Surface path: {self.total_length_mm:.0f} mm, entirely along "
-                        "the structure.")
-            return (f"Surface path: {self.total_length_mm:.0f} mm, "
-                    f"{self.surface_ratio * 100:.0f} % along the structure, "
-                    f"{self.n_bridges} hop(s) between parts "
-                    f"({self.bridge_length_mm:.0f} mm).")
+            text = f"Surface path: {self.total_length_mm:.0f} mm"
+            text += (", entirely along the structure" if not self.n_bridges else
+                     f", {self.surface_ratio * 100:.0f} % along the structure, "
+                     f"{self.n_bridges} hop(s) between parts "
+                     f"({self.bridge_length_mm:.0f} mm)")
+            if self.offset_mm:
+                text += f", lifted to {self.min_clearance_mm:.0f} mm off the DMU"
+            return text + "."
 
-        if not self.n_bridges:
-            return (f"Chemin de surface : {self.total_length_mm:.0f} mm, entièrement "
-                    "le long de la structure.")
-        return (f"Chemin de surface : {self.total_length_mm:.0f} mm, "
-                f"{self.surface_ratio * 100:.0f} % le long de la structure, "
-                f"{self.n_bridges} saut(s) entre pièces "
-                f"({self.bridge_length_mm:.0f} mm).")
+        text = f"Chemin de surface : {self.total_length_mm:.0f} mm"
+        text += (", entièrement le long de la structure" if not self.n_bridges else
+                 f", {self.surface_ratio * 100:.0f} % le long de la structure, "
+                 f"{self.n_bridges} saut(s) entre pièces "
+                 f"({self.bridge_length_mm:.0f} mm)")
+        if self.offset_mm:
+            text += f", décollé à {self.min_clearance_mm:.0f} mm du DMU"
+        return text + "."
 
 
 def _corridor_mask(vertices, start, goal, factor: float) -> np.ndarray:
@@ -162,6 +169,7 @@ def surface_path(
     bridges_per_pair: int = DEFAULT_BRIDGES_PER_PAIR,
     corridor_factor: float = DEFAULT_CORRIDOR_FACTOR,
     num_points: int | None = None,
+    offset_mm: float = 0.0,
 ) -> SurfacePathResult:
     """Chemin le plus court le long de la surface, sauts entre pièces compris.
 
@@ -175,6 +183,10 @@ def surface_path(
         corridor_factor: enveloppe autour de A-B, en multiples de la distance
             directe. 0 désactive la restriction.
         num_points: rééchantillonnage final.
+        offset_mm: distance à laquelle décoller le tracé de la surface. Zéro
+            le laisse *sur* la surface, donc en interférence sur toute sa
+            longueur — utile pour visualiser la géodésique, inutilisable comme
+            point de départ pour les agents.
 
     Returns:
         Un :class:`SurfacePathResult`. Jamais d'exception, jamais de repli
@@ -309,6 +321,16 @@ def surface_path(
     if num_points and len(points) >= 2:
         points = _resample(points, int(num_points))
 
+    # Décollement : les longueurs mesurées ci-dessus décrivent le trajet le
+    # long de la surface, elles ne sont donc pas recalculées ici. Ce qui change
+    # est la distance au DMU, mesurée et rapportée séparément.
+    min_clearance = 0.0
+    if offset_mm and offset_mm > 0:
+        try:
+            points, min_clearance = offset_from_surface(mesh, points, float(offset_mm))
+        except Exception:
+            offset_mm = 0.0
+
     return SurfacePathResult(
         points=points.astype(np.float32),
         success=True,
@@ -316,7 +338,60 @@ def surface_path(
         bridge_length_mm=bridge_len,
         surface_length_mm=surface_len,
         graph_nodes=n,
+        min_clearance_mm=min_clearance,
+        offset_mm=float(offset_mm or 0.0),
     )
+
+
+def offset_from_surface(mesh, points, target_mm, passes=4):
+    """Décolle un tracé de la surface, jusqu'à la distance visée.
+
+    Un chemin de surface est **sur** la surface : sa distance au DMU vaut zéro
+    et il est donc en interférence sur toute sa longueur. Les agents passent
+    alors leurs premières centaines d'itérations à faire ce qu'un simple
+    décalage géométrique fait en une fois.
+
+    Chaque point est repoussé le long de la normale de la face la plus proche.
+    L'opération est répétée : après un premier décalage, la face la plus proche
+    peut avoir changé — près d'une arête, notamment — et un seul passage
+    laisserait des points en deçà de la cible.
+
+    Args:
+        mesh: maillage trimesh de l'environnement.
+        points: tracé ``(n, 3)``.
+        target_mm: distance visée, en mm.
+        passes: nombre de reprises.
+
+    Returns:
+        ``(points, distance_minimale_mesurée)``. La distance est mesurée contre
+        le maillage réel, pas déduite du décalage demandé : c'est la seule qui
+        engage.
+    """
+    from trimesh.proximity import ProximityQuery
+
+    result = np.array(points, dtype=np.float64, copy=True)
+    if len(result) == 0 or target_mm <= 0:
+        return result, 0.0
+
+    query = ProximityQuery(mesh)
+    for _ in range(max(1, int(passes))):
+        closest, distance, faces = query.on_surface(result)
+        normals = mesh.face_normals[faces]
+
+        # Un point dans la matière doit ressortir : la normale pointe déjà vers
+        # l'extérieur, il suffit de partir de sa projection sur la surface.
+        outward = np.einsum("ij,ij->i", result - closest, normals) >= 0
+        signed = np.where(outward, distance, -distance)
+
+        short = signed < target_mm
+        if not np.any(short):
+            break
+        result[short] = closest[short] + normals[short] * target_mm
+
+    closest, distance, faces = query.on_surface(result)
+    inside = np.einsum("ij,ij->i", result - closest, mesh.face_normals[faces]) < 0
+    signed = np.where(inside, -distance, distance)
+    return result, float(signed.min())
 
 
 def _build_bridges(vertices, labels, n_parts, max_bridge_mm, bridges_per_pair):

@@ -16,6 +16,7 @@ from core.surface_path import (  # noqa: E402
     NO_MESH,
     NO_PATH,
     SurfacePathResult,
+    offset_from_surface,
     surface_path,
 )
 
@@ -183,3 +184,81 @@ def test_un_resultat_vide_a_des_valeurs_sures():
     assert result.total_length_mm == 0.0
     assert result.surface_ratio == 1.0
     assert len(result.points) == 0
+
+
+# ----------------------------------------------------------------------
+# Décollement de la surface
+# ----------------------------------------------------------------------
+
+def clearance(mesh, points):
+    """Distance signée à la structure : négative = à l'intérieur."""
+    from trimesh.proximity import ProximityQuery
+
+    closest, distance, faces = ProximityQuery(mesh).on_surface(np.asarray(points))
+    dehors = np.einsum("ij,ij->i", np.asarray(points) - closest,
+                       mesh.face_normals[faces]) >= 0
+    return np.where(dehors, distance, -distance)
+
+
+def test_sur_la_surface_le_trace_est_en_interference(sphere):
+    """Le défaut signalé : un tracé qui rase la structure clashe dès le départ."""
+    trace = surface_path(sphere, (0, 0, 100), (0, 0, -100), num_points=40)
+    assert trace.success
+    assert clearance(sphere, trace.points).max() < 1.0, \
+        "sans décalage, le tracé colle au maillage"
+
+
+def test_le_trace_decale_respecte_la_distance_demandee(sphere):
+    trace = surface_path(sphere, (0, 0, 100), (0, 0, -100),
+                         num_points=40, offset_mm=25.0)
+    assert trace.success
+    assert clearance(sphere, trace.points).min() > 24.0
+
+
+def test_la_distance_atteinte_est_rendue(sphere):
+    trace = surface_path(sphere, (0, 0, 100), (0, 0, -100),
+                         num_points=40, offset_mm=25.0)
+    assert trace.offset_mm == pytest.approx(25.0)
+    # Le tracé est rendu en float32, comme le manipulent les agents : la marge
+    # annoncée et la marge remesurée diffèrent donc de quelques nanomètres.
+    assert trace.min_clearance_mm == pytest.approx(
+        float(clearance(sphere, trace.points).min()), abs=1e-3)
+
+
+@pytest.mark.parametrize("cible", [5.0, 20.0, 60.0])
+def test_plusieurs_distances_sont_atteintes(sphere, cible):
+    decale, marge = offset_from_surface(sphere, sphere.vertices[::40], cible)
+    assert marge >= cible - 1e-6
+
+
+def test_un_decalage_nul_ne_bouge_rien(sphere):
+    points = np.array(sphere.vertices[::40], dtype=float)
+    decale, _ = offset_from_surface(sphere, points, 0.0)
+    assert np.allclose(decale, points)
+
+
+def test_le_decalage_pousse_vers_l_exterieur(sphere):
+    """Décaler vers l'intérieur enfoncerait le câble dans la structure."""
+    points = np.array(sphere.vertices[::40], dtype=float)
+    decale, _ = offset_from_surface(sphere, points, 20.0)
+    assert np.linalg.norm(decale, axis=1).min() > np.linalg.norm(points, axis=1).max()
+
+
+def test_un_point_deja_assez_loin_n_est_pas_ramene(sphere):
+    """On ne colle pas au maillage un point qui respirait déjà."""
+    loin = np.array([[0.0, 0.0, 300.0]])
+    decale, _ = offset_from_surface(sphere, loin, 20.0)
+    assert np.allclose(decale, loin)
+
+
+def test_aucun_point_ne_donne_aucun_point(sphere):
+    decale, marge = offset_from_surface(sphere, np.zeros((0, 3)), 20.0)
+    assert len(decale) == 0 and marge == 0.0
+
+
+def test_le_decalage_marche_sur_des_pieces_disjointes(deux_pieces):
+    """Le cas réel : une maquette fusionnée n'est jamais connexe."""
+    trace = surface_path(deux_pieces, (-150, 0, 10), (150, 0, 10),
+                         num_points=60, offset_mm=15.0)
+    assert trace.success
+    assert trace.min_clearance_mm > 14.0
