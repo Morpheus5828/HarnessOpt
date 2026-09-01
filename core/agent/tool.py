@@ -54,7 +54,50 @@ def load_crabe_clamp(stl_path, max_check_points=400):
         check_points = check_points[rng.choice(len(check_points), max_check_points, replace=False)]
 
     return {"dx": float((bmax[0] - bmin[0]) / 2.0), "dy": float((bmax[1] - bmin[1]) / 2.0),
-            "height": float(bmax[2]), "check_points": check_points}
+            "height": float(bmax[2]),
+            "check_points": check_points,
+            # Géométrie complète dans le repère local du crabe : plan de
+            # contact en z = 0, corps vers les z positifs. ``check_points`` en
+            # est un échantillon aléatoire, inutilisable pour un affichage —
+            # d'où ces deux tableaux, qui permettent de dessiner le crabe
+            # exactement là où le test de collision le place.
+            "vertices": np.asarray(verts, dtype=np.float32),
+            "faces": np.asarray(mesh_clamp.faces, dtype=np.int64)}
+
+
+def crabe_transform(surface_position, x_axis, y_axis, normal):
+    """Repère du crabe posé : matrice de rotation et origine.
+
+    C'est la convention de :func:`is_crabe_clash_free` — la même doit servir à
+    l'affichage, sans quoi on dessinerait le crabe ailleurs que là où sa
+    collision a été vérifiée.
+    """
+    rotation = np.stack([x_axis, y_axis, normal], axis=1)
+    return rotation, np.asarray(surface_position, dtype=np.float64)
+
+
+def crabe_world_vertices(crabe, crabe_geometry):
+    """Sommets du crabe posé, dans le repère de la maquette.
+
+    Renvoie ``None`` si la géométrie n'est pas disponible : sans modèle STL
+    chargeable, il n'y a rien à dessiner — et rien n'a été posé non plus.
+    """
+    if crabe_geometry is None:
+        return None
+    vertices = crabe_geometry.get("vertices")
+    if vertices is None or not len(vertices):
+        return None
+
+    seat = crabe.get("surface_position")
+    if seat is None:
+        seat = crabe.get("position")
+    if seat is None:
+        return None
+
+    rotation, origin = crabe_transform(
+        seat, crabe["x_axis"], crabe["y_axis"], crabe["normal"]
+    )
+    return origin + vertices @ rotation.T
 
 
 def get_crabe_geometry(stl_path):

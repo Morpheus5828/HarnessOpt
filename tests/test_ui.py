@@ -780,6 +780,9 @@ class TestAffichage3DDesFixations:
         def show_path(self, points, name, **kwargs):
             self.actors[name] = ("path", kwargs.get("color"))
 
+        def show_mesh(self, mesh, name, **kwargs):
+            self.actors[name] = ("mesh", kwargs.get("color"), mesh)
+
         def remove_prefix(self, prefix):
             for name in [n for n in self.actors if n.startswith(prefix)]:
                 del self.actors[name]
@@ -833,45 +836,32 @@ class TestAffichage3DDesFixations:
         finally:
             app.controller.viewer = None
 
-    def test_les_crabes_poses_sont_dessines(self, app):
-        viewer = self._ViewerFactice()
-        app.controller.viewer = viewer
-        app.controller._clamp_signature = ()
-        try:
-            app.controller._draw_clamps([
-                {"arc_mm": 100.0, "tilt_deg": 2.0,
-                 "position": np.array([0.0, 0.0, 0.0]),
-                 "surface_position": np.array([0.0, 0.0, -20.0])},
-            ])
-            assert "clamp_0" in viewer.actors
-            assert "clamp_leg_0" in viewer.actors
-        finally:
-            app.controller.viewer = None
-            app.controller._clamp_signature = ()
+    @staticmethod
+    def _crabe():
+        """Un crabe posé, tel que ``compute_crabes`` le publie.
 
-    def test_un_crabe_sans_position_ne_casse_pas(self, app):
+        Le placement géométrique lui-même est vérifié dans
+        ``tests/test_clamp_display.py`` : il demande trimesh et pyvista, que
+        l'interpréteur des tests d'interface n'a pas.
+        """
+        return {
+            "arc_mm": 250.0, "tilt_deg": 2.0,
+            "position": np.array([0.0, 0.0, 20.0]),
+            "surface_position": np.array([0.0, 0.0, 0.0]),
+            "x_axis": np.array([1.0, 0.0, 0.0]),
+            "y_axis": np.array([0.0, 1.0, 0.0]),
+            "normal": np.array([0.0, 0.0, 1.0]),
+        }
+
+    def test_sans_modele_aucun_crabe_n_est_dessine(self, app):
+        """Rien n'a été posé non plus : on n'invente pas un marqueur."""
         viewer = self._ViewerFactice()
         app.controller.viewer = viewer
         app.controller._clamp_signature = ()
+        app.controller._crabe_stl_path = ""
         try:
-            app.controller._draw_clamps([{"arc_mm": 1.0, "tilt_deg": 0.0}])
+            app.controller._draw_clamps([self._crabe()])
             assert not any(n.startswith("clamp_") for n in viewer.actors)
-        finally:
-            app.controller.viewer = None
-            app.controller._clamp_signature = ()
-
-    def test_les_crabes_identiques_ne_sont_pas_redessines(self, app):
-        """Redessiner quatre fois par seconde ferait clignoter la vue."""
-        viewer = self._ViewerFactice()
-        app.controller.viewer = viewer
-        app.controller._clamp_signature = ()
-        crabes = [{"arc_mm": 100.0, "tilt_deg": 2.0,
-                   "position": np.array([0.0, 0.0, 0.0])}]
-        try:
-            app.controller._draw_clamps(crabes)
-            avant = viewer.renders
-            app.controller._draw_clamps(crabes)
-            assert viewer.renders == avant
         finally:
             app.controller.viewer = None
             app.controller._clamp_signature = ()

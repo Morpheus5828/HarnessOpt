@@ -33,6 +33,10 @@ from core.routing_rules import ALL_RULES, ClearanceModel, HarnessSpec, RoutingRu
 
 __all__ = ["AppController"]
 
+#: Au-delà, dessiner chaque crabe avec sa géométrie complète coûterait plus
+#: cher que ce que la lecture y gagne.
+MAX_DRAWN_CLAMPS = 60
+
 #: Attente maximale d'une réponse de l'utilisateur, en secondes. Passé ce
 #: délai, le lancement reprend avec le réglage déjà présent sur la page plutôt
 #: que de rester bloqué sur une fenêtre que personne ne regarde.
@@ -72,6 +76,8 @@ class AppController:
         self._path_signatures: dict[str, tuple] = {}
         #: Dernier jeu de crabes dessiné, pour ne pas redessiner l'identique.
         self._clamp_signature: tuple = ()
+        #: Modèle STL du crabe, pour le dessiner tel qu'il est réellement posé.
+        self._crabe_stl_path: str = ""
         #: Scores successifs du meilleur agent, pour détecter la stagnation.
         self._best_scores: list = []
         #: Le modèle de crabe a-t-il pu être chargé ? Renseigné au lancement.
@@ -365,7 +371,8 @@ class AppController:
             # Le modèle de crabe est vérifié une fois, ici : s'il est
             # illisible, aucune règle de fixation ne pourra jamais passer, et
             # mieux vaut le dire tout de suite que laisser tourner les agents.
-            self._clamp_model_ok = self._check_clamp_model(config.get("crabe_stl_path", ""))
+            self._crabe_stl_path = config.get("crabe_stl_path", "")
+            self._clamp_model_ok = self._check_clamp_model(self._crabe_stl_path)
             self._best_scores.clear()
 
             # Analyse des fixations déjà montées, avant tout cheminement : les
@@ -902,9 +909,15 @@ class AppController:
     def _draw_clamps(self, crabes):
         """Place les crabes posés par le meilleur agent, au fil du calcul.
 
-        Ils étaient calculés à chaque itération et pesaient déjà sur la
-        récompense, mais restaient invisibles : rien ne permettait de voir que
-        les agents en posaient.
+        Le crabe est dessiné **avec sa géométrie réelle**, dans le repère où
+        son absence de collision a été vérifiée : même matrice de rotation,
+        même origine sur la structure. Un repère symbolique ne dirait rien de
+        l'encombrement réel de la fixation, qui est précisément ce que
+        l'intégrateur doit pouvoir juger à l'œil.
+
+        Sans modèle STL chargeable, il n'y a rien à dessiner — et rien n'a été
+        posé non plus, ``compute_crabes`` rendant une liste vide. L'onglet
+        « Conseils » le signale ; on n'invente pas un marqueur à la place.
         """
         if self.viewer is None or not self.viewer.is_available:
             return
@@ -918,23 +931,47 @@ class AppController:
         self._clamp_signature = signature
 
         self.viewer.remove_prefix("clamp_")
-        radius = max(6.0, self.rules.harness.radius_mm if self.rules else 20.0)
-        for index, crabe in enumerate(crabes):
-            # ``or`` est proscrit ici : ``position`` est un tableau numpy, dont
-            # la valeur de vérité est ambiguë et lève une exception.
-            position = crabe.get("position")
-            if position is None:
-                continue
-            self.viewer.show_sphere(position, f"clamp_{index}",
-                                    radius=radius * 1.1, color="#FFD166")
+        geometry = self._crabe_geometry()
+        if geometry is None:
+            self.viewer.render()
+            return
 
-            # Le pied du crabe, sur la structure : c'est lui qui montre où la
-            # fixation est réellement vissée.
-            seat = crabe.get("surface_position")
-            if seat is not None:
-                self.viewer.show_path([seat, position], f"clamp_leg_{index}",
-                                      color="#FFD166", width=5)
+        for index, crabe in enumerate(crabes[:MAX_DRAWN_CLAMPS]):
+            body = self._clamp_body(crabe, geometry)
+            if body is not None:
+                self.viewer.show_mesh(body, f"clamp_{index}", color="#FFD166",
+                                      opacity=1.0, show_edges=False)
         self.viewer.render()
+
+    def _crabe_geometry(self):
+        """Géométrie du crabe, chargée une fois et mémorisée."""
+        path = self._crabe_stl_path
+        if not path:
+            return None
+        try:
+            from core.agent.tool import get_crabe_geometry
+
+            return get_crabe_geometry(path)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _clamp_body(crabe, geometry):
+        """Maillage PyVista du crabe posé, ou ``None`` si indessinable."""
+        try:
+            import numpy as np
+            import pyvista as pv
+
+            from core.agent.tool import crabe_world_vertices
+
+            vertices = crabe_world_vertices(crabe, geometry)
+            if vertices is None:
+                return None
+            faces = np.asarray(geometry["faces"], dtype=np.int64)
+            padded = np.hstack([np.full((len(faces), 1), 3, dtype=np.int64), faces])
+            return pv.PolyData(np.asarray(vertices, dtype=float), padded.ravel())
+        except Exception:
+            return None
 
     def _on_viewer_status(self, mode: str, error: str | None):
         from ui.viewer3d import MODE_EMBEDDED, MODE_STARTING, MODE_UNAVAILABLE

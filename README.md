@@ -349,8 +349,19 @@ Les crabes ne sont pas ajoutés après coup : `compute_crabes` tourne **à chaqu
 itération**, à l'intérieur de la boucle d'apprentissage. Leur position pèse sur
 la récompense (`R_crabe`, `R_fixation`) et alimente le rapport de conformité,
 si bien que la trajectoire est déplacée pour aller là où l'on peut réellement
-fixer. Ils sont désormais dessinés au fil du calcul : une bille dorée sur le
-câble, reliée à son pied sur la structure.
+fixer.
+
+Ils sont dessinés au fil du calcul **avec leur géométrie réelle** — le modèle
+STL du crabe, pas un repère symbolique — et **dans le repère où leur absence de
+collision a été vérifiée** : même matrice de rotation `[x_axis, y_axis, normal]`,
+même origine sur la structure que `is_crabe_clash_free`. Dessiner ailleurs que
+là où le test a eu lieu donnerait une vue rassurante et fausse ; un test croisé
+vérifie que la géométrie affichée reste bien du bon côté de la surface.
+
+Le modèle est normalisé une fois pour toutes au chargement : sa face de plus
+grande aire devient le plan de contact, ramené en `z = 0` et centré. C'est ce
+qui permet de le poser sur n'importe quelle surface sans se soucier de
+l'orientation d'origine du fichier.
 
 Un point à connaître : **sans modèle de crabe chargeable, aucun crabe n'est
 posé**, et la règle du pas entre fixations ne peut jamais passer. C'est
@@ -473,7 +484,7 @@ ui/
   charts.py                 courbes (récompense + grandeurs physiques)
   viewer3d.py               vue 3D incrustée (fil de rendu dédié)
   widgets/  pages/          composants et écrans
-tests/                      312 tests hors interface, 133 tests d'interface
+tests/                      333 tests hors interface, 131 tests d'interface
 ```
 
 `core/geometry_metrics.py`, `core/routing_rules.py`, `core/reward_terms.py` et
