@@ -349,13 +349,57 @@ parle, plutôt que sur une liste de coordonnées. Sa réponse se retrouve sur
 l'interrupteur *Emprunter les fixations existantes* de la page, et y reste
 mémorisée. Sans passage détecté, aucune question n'est posée.
 
+#### Une encoche par peigne, pas toutes
+
+Un peigne porte plusieurs encoches **côte à côte**, une par faisceau : les
+autres appartiennent aux voisins. Un faisceau en emprunte donc **une**. Le
+trajet enfilait au contraire toutes les encoches détectées, ordonnées par la
+projection de leur centre sur A→B — et comme les encoches d'un même peigne se
+projettent au même endroit, elles se suivaient dans la liste. Le câble
+traversait une encoche, ressortait, et repartait aussitôt dans celle d'à côté
+au lieu de rejoindre le peigne suivant.
+
+Deux libertés restent à exploiter, et elles ne se décident pas séparément :
+**quelle** encoche prendre sur chaque peigne, et **dans quel sens** la
+traverser — `p_in` et `p_out` sont interchangeables, seule leur solidarité
+compte. `core/passage_route.py` tranche les deux ensemble, par programmation
+dynamique sur les peignes ordonnés le long du trajet : le résultat est le
+trajet le plus court parmi **tous** les choix d'encoche et de sens, vérifié
+contre une énumération exhaustive. Un choix local — « l'encoche la plus
+proche », « le côté rencontré en premier » — rejouerait le défaut sous une
+autre forme : c'est justement en raisonnant encoche par encoche qu'on finit
+par faire la navette sur un même peigne.
+
+Mesuré sur deux peignes de six encoches qui se font face : dix allers-retours
+sur un même peigne avant, aucun après ; trajet de 2 551 mm ramené à 1 840 mm.
+
+Un peigne est situé dans le trajet par **son centre**, pas par celui d'une de
+ses encoches : sa place ne doit pas dépendre de l'encoche qu'on lui aura
+choisie, puisque ce choix vient après.
+
+L'encoche retenue est visible partout : marquée d'une flèche dans la liste du
+bandeau, seule à garder ses couleurs dans la vue 3D — les autres passent en
+gris fin plutôt que d'être effacées, car elles existent — et nommée en console
+avec son numéro et son sens de traversée.
+
+#### Un couple ne se disloque pas
+
 **Répondre oui contraint deux choses.** Le chemin de départ est découpé en
-tronçons par les couples entrée/sortie, ordonnés le long de A→B et orientés
-dans le sens de la marche ; la traversée de l'encoche elle-même est une ligne
-droite, y lancer une recherche de chemin ferait contourner le peigne au lieu
-de passer dedans. Et surtout, **les agents y sont maintenus** : à chaque
-itération le point le plus proche de chaque passage est ramené exactement
-dessus, puis retiré des points que l'agent peut déplacer.
+tronçons par les couples entrée/sortie retenus ; la traversée de l'encoche
+elle-même est une ligne droite de **deux points**, y lancer une recherche de
+chemin ferait contourner le peigne au lieu de passer dedans. Et surtout, **les
+agents y sont maintenus** : à chaque itération les couples sont replacés sur
+la trajectoire, puis retirés des points que l'agent peut déplacer.
+
+L'épinglage se fait **par couple**, jamais point par point. Un couple n'est
+pas deux contraintes indépendantes, c'est une traversée : épingler chaque
+point sur le point du câble le plus proche laisse le câble entrer dans une
+encoche et ressortir par une autre — et sur un peigne à treize encoches
+voisines, c'est le cas général, tous les candidats étant à quelques
+centimètres. Les deux points d'un couple vont donc sur deux points
+**consécutifs** du câble, et les couples se succèdent dans l'ordre du trajet.
+Faute de place, un passage reste non épinglé : un couple coupé en deux serait
+pire que pas de contrainte du tout.
 
 Cette dernière contrainte n'est pas un excès de prudence. L'agent dispose déjà
 d'une attraction par récompense vers les fixations existantes ; mesurée sur une
@@ -527,6 +571,7 @@ core/
   routing_rules.py          règles d'intégration + rapport de conformité
   diagnostics.py            conseils quand la convergence bloque
   fixation_scan.py          fixations existantes et passages imposés
+  passage_route.py          quelle encoche emprunter par peigne, dans quel sens
   reward_terms.py           traduction des règles en signal d'apprentissage
   path_planner.py           recherche du chemin de départ dans l'espace libre
   surface_path.py           chemin le long de la surface, sauts entre pièces compris

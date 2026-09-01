@@ -378,3 +378,54 @@ def test_une_fixation_reconnue_est_dessinee_en_maillage(stl_path):
     ))
     corps = controller.viewer.actors["fixation_body_0"]
     assert hasattr(corps, "n_points"), "on attend un maillage, pas un centre"
+
+
+# ----------------------------------------------------------------------
+# Encoche empruntée ou laissée aux voisins
+# ----------------------------------------------------------------------
+
+def scan_peigne(n=3, x=100.0):
+    from core.fixation_scan import summarise
+
+    points = []
+    for i in range(n):
+        points += [[x, i * 50.0, 0.0], [x, i * 50.0, 20.0]]
+    return summarise([{"name": "peigne.stl", "position": [x, 50.0, 10.0],
+                       "score": 0.9, "routing_points": points}])
+
+
+def test_sans_choix_toutes_les_encoches_sont_montrees(stl_path):
+    """Avant la question à l'utilisateur, on ne préjuge de rien."""
+    controller = _controleur(stl_path)
+    controller._draw_fixations(scan_peigne(3))
+    actors = controller.viewer.actors
+    assert sum(1 for name in actors if name.startswith("fixation_in_")) == 3
+
+
+def test_seule_l_encoche_empruntee_reste_en_couleur(stl_path):
+    """Treize encoches allumées ne diraient pas par laquelle le câble passe."""
+    from core.passage_route import choose_crossings
+
+    scan = scan_peigne(3)
+    crossings = choose_crossings((0, 0, 0), (200, 0, 0), [list(scan.fixations[0].passages)])
+    controller = _controleur(stl_path)
+    controller._draw_fixations(scan, crossings)
+
+    actors = controller.viewer.actors
+    entrees = [name for name in actors if name.startswith("fixation_in_")]
+    assert len(entrees) == 1, "une seule entrée verte : celle qui est empruntée"
+    assert len(crossings) == 1
+
+
+def test_les_encoches_laissees_restent_visibles(stl_path):
+    """Elles existent : les effacer ferait croire à un scan incomplet."""
+    from core.passage_route import choose_crossings
+
+    scan = scan_peigne(3)
+    crossings = choose_crossings((0, 0, 0), (200, 0, 0), [list(scan.fixations[0].passages)])
+    controller = _controleur(stl_path)
+    controller._draw_fixations(scan, crossings)
+
+    creneaux = [name for name in controller.viewer.actors
+                if name.startswith("fixation_slot_")]
+    assert len(creneaux) == 3
