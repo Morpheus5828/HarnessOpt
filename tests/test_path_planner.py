@@ -381,14 +381,28 @@ class TestPassageParLesFixations:
     """
 
     @staticmethod
-    def _controleur_avec_passages(passages):
+    def _controleur_avec_passages(passages, name="peigne.stl"):
+        """Un seul peigne, portant toutes ces encoches."""
+        return TestPassageParLesFixations._controleur_avec_peignes(
+            {name: passages}
+        )
+
+    @staticmethod
+    def _controleur_avec_peignes(peignes):
+        """Plusieurs peignes, chacun avec ses propres encoches.
+
+        La distinction est le cœur du sujet : deux encoches d'un même peigne
+        sont côte à côte et destinées à des faisceaux différents ; deux peignes
+        sont deux étapes du trajet.
+        """
         from core.fixation_scan import summarise
 
         controller, view = TestIntegrationControleur._controleur()
-        controller.scan_result = summarise(
-            [{"name": "peigne.stl", "position": [900.0, 400.0, 250.0], "score": 0.9,
-              "routing_points": passages}]
-        )
+        controller.scan_result = summarise([
+            {"name": name, "position": list(np.mean(np.asarray(points), axis=0)),
+             "score": 0.9, "routing_points": points}
+            for name, points in peignes.items()
+        ])
         return controller, view
 
     @staticmethod
@@ -411,24 +425,80 @@ class TestPassageParLesFixations:
         assert len(nodes) == 4          # A, p_in, p_out, B
         assert forced == {1}            # le tronçon p_in -> p_out reste droit
 
-    def test_les_encoches_sont_ordonnees_le_long_du_trajet(self):
+    def test_les_peignes_sont_ordonnes_le_long_du_trajet(self):
         """Deux peignes pris à l'envers feraient revenir le câble en arrière."""
-        controller, _ = self._controleur_avec_passages([
-            [1400.0, 350.0, 250.0], [1400.0, 450.0, 250.0],   # loin
-            [600.0, 350.0, 250.0], [600.0, 450.0, 250.0],     # proche
-        ])
+        controller, _ = self._controleur_avec_peignes({
+            "loin.stl": [[1400.0, 350.0, 250.0], [1400.0, 450.0, 250.0]],
+            "proche.stl": [[600.0, 350.0, 250.0], [600.0, 450.0, 250.0]],
+        })
         nodes, _ = controller._route_nodes(self._valeurs())
         abscisses = [float(n[0]) for n in nodes]
         assert abscisses == sorted(abscisses)
 
-    def test_l_entree_est_le_cote_rencontre_en_premier(self):
-        """Entrer par la sortie obligerait le câble à faire demi-tour dedans."""
+    def test_un_seul_couple_est_retenu_par_peigne(self):
+        """Le défaut signalé : le câble faisait la navette sur un même peigne.
+
+        Un peigne porte une encoche par faisceau ; celui-ci n'en emprunte
+        qu'une. Enfilées à la file, les encoches d'un même peigne se suivaient
+        dans le trajet — sortir d'une encoche pour entrer aussitôt dans sa
+        voisine, au lieu de rejoindre le peigne suivant.
+        """
+        controller, _ = self._controleur_avec_passages([
+            [900.0, 300.0, 250.0], [900.0, 340.0, 250.0],
+            [900.0, 380.0, 250.0], [900.0, 420.0, 250.0],
+            [900.0, 460.0, 250.0], [900.0, 500.0, 250.0],
+        ])
+        nodes, forced = controller._route_nodes(self._valeurs())
+        assert len(nodes) == 4, "A, une entrée, une sortie, B"
+        assert forced == {1}
+
+    def test_chaque_peigne_apporte_exactement_une_traversee(self):
+        controller, _ = self._controleur_avec_peignes({
+            "avant.stl": [[600.0, 300.0, 250.0], [600.0, 340.0, 250.0],
+                          [600.0, 380.0, 250.0], [600.0, 420.0, 250.0]],
+            "arriere.stl": [[1400.0, 300.0, 250.0], [1400.0, 340.0, 250.0],
+                            [1400.0, 380.0, 250.0], [1400.0, 420.0, 250.0]],
+        })
+        nodes, forced = controller._route_nodes(self._valeurs())
+        assert len(nodes) == 6, "A, deux couples, B"
+        assert forced == {1, 3}
+
+    def test_le_sens_de_traversee_suit_le_trajet(self):
+        """p_in et p_out sont interchangeables : seul leur couple est imposé."""
         # Encoche décrite à rebours du sens de marche (A vers +x).
         controller, _ = self._controleur_avec_passages(
             [[950.0, 400.0, 250.0], [850.0, 400.0, 250.0]]
         )
         nodes, _ = controller._route_nodes(self._valeurs())
         assert float(nodes[1][0]) < float(nodes[2][0])
+
+    def test_l_entree_et_la_sortie_viennent_de_la_meme_encoche(self):
+        """Entrer dans une encoche et ressortir par une autre est impossible."""
+        controller, _ = self._controleur_avec_passages([
+            [900.0, 300.0, 250.0], [900.0, 340.0, 250.0],
+            [900.0, 460.0, 250.0], [900.0, 500.0, 250.0],
+        ])
+        crossings = controller._crossings_to_use(self._valeurs())
+        assert len(crossings) == 1
+        couple = {tuple(crossings[0].passage.p_in), tuple(crossings[0].passage.p_out)}
+        assert {tuple(crossings[0].entry), tuple(crossings[0].exit)} == couple
+
+    def test_la_traversee_ne_consomme_que_deux_points_du_cable(self, dmu_disjoint):
+        """Une encoche de 5 cm n'a pas à recevoir la part de budget d'un mètre."""
+        controller, _ = self._controleur_avec_passages(
+            [[900.0, 380.0, 250.0], [900.0, 420.0, 250.0]]
+        )
+        points = controller._build_initial_path(
+            dmu_disjoint, TestIntegrationControleur._regles(),
+            self._valeurs(start_path="balanced", initial_points=48),
+        )
+        assert points is not None
+        proches = [
+            index for index, point in enumerate(points)
+            if 370.0 <= float(point[1]) <= 430.0 and abs(float(point[0]) - 900.0) < 1.0
+        ]
+        assert len(proches) == 2, "l'entrée et la sortie, et rien entre les deux"
+        assert proches[1] == proches[0] + 1
 
     def test_decocher_l_option_ignore_les_fixations(self):
         controller, _ = self._controleur_avec_passages(

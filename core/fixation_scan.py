@@ -78,6 +78,10 @@ class Passage:
     index: int
     p_in: tuple
     p_out: tuple
+    #: Nom du peigne qui porte cette encoche. Deux encoches d'un même peigne
+    #: sont côte à côte et destinées à **des faisceaux différents** : savoir
+    #: d'où vient une encoche est ce qui permet de n'en emprunter qu'une.
+    comb: str = ""
 
     @property
     def center(self) -> tuple:
@@ -209,8 +213,10 @@ def summarise(raw_clamps, scanned_files: int = 0) -> ScanResult:
     fixations = []
     for clamp in raw_clamps or []:
         points = list(clamp.get("routing_points") or [])
+        name = str(clamp.get("name", "?"))
         passages = [
-            Passage(index=i, p_in=tuple(points[2 * i]), p_out=tuple(points[2 * i + 1]))
+            Passage(index=i, p_in=tuple(points[2 * i]), p_out=tuple(points[2 * i + 1]),
+                    comb=name)
             # Un nombre impair de points signifierait un passage tronqué : on
             # ne garde que les couples complets plutôt que d'inventer un point.
             for i in range(len(points) // 2)
@@ -218,7 +224,7 @@ def summarise(raw_clamps, scanned_files: int = 0) -> ScanResult:
         transform = clamp.get("transform") or ()
         fixations.append(
             DetectedFixation(
-                name=str(clamp.get("name", "?")),
+                name=name,
                 position=tuple(clamp.get("position") or ()),
                 score=float(clamp.get("score", 0.0)),
                 passages=passages,

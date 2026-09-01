@@ -565,6 +565,56 @@ def snap_mandatory_points(waypoints, targets, used=None):
     return locked
 
 
+def snap_passages(waypoints, couples, used=None):
+    """Épingle chaque traversée d'encoche sur deux points consécutifs du câble.
+
+    Un couple entrée/sortie n'est pas deux contraintes indépendantes : c'est
+    **une** traversée. Les épingler séparément — chacun sur le point du câble
+    qui s'en approche le plus — laisse le câble entrer dans une encoche et
+    ressortir par une autre, ou traverser à l'envers, ce qu'aucun peigne ne
+    permet. Sur un peigne à treize encoches côte à côte, c'est même le cas
+    général : les points candidats sont tous à quelques centimètres.
+
+    On impose donc deux choses. Les deux points d'un couple vont sur deux
+    points **consécutifs** du câble — la traversée est un segment droit, et
+    rien ne peut s'intercaler dedans. Et les couples se succèdent dans l'ordre
+    du trajet : le second commence après la sortie du premier.
+
+    Args:
+        waypoints: trajectoire ``(n, 3)``, modifiée sur place.
+        couples: traversées ``(k, 2, 3)``, dans l'ordre du trajet, ou ``None``.
+        used: indices déjà réservés, à ne pas réattribuer.
+
+    Returns:
+        L'ensemble des indices verrouillés.
+    """
+    if couples is None or len(couples) == 0 or len(waypoints) < 4:
+        return set()
+
+    locked = set(used or ())
+    n = len(waypoints)
+    # Les extrémités appartiennent aux équipements : elles ne se négocient pas.
+    floor = 1
+    for entry, exit_point in np.asarray(couples, dtype=np.float32):
+        best, best_cost = None, np.inf
+        for index in range(floor, n - 2):
+            if index in locked or (index + 1) in locked:
+                continue
+            cost = (float(np.linalg.norm(waypoints[index] - entry))
+                    + float(np.linalg.norm(waypoints[index + 1] - exit_point)))
+            if cost < best_cost:
+                best, best_cost = index, cost
+        if best is None:
+            # Plus de place : on préfère un passage non épinglé à un couple
+            # disloqué, qui serait pire que pas de contrainte du tout.
+            break
+        waypoints[best] = entry
+        waypoints[best + 1] = exit_point
+        locked.update((best, best + 1))
+        floor = best + 2
+    return locked
+
+
 def get_segment_test_points(wps, steps=10):
     if len(wps) < 2:
         return wps

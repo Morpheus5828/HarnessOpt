@@ -167,10 +167,17 @@ def algo_worker(
             # points sont donc épinglés à chaque itération et retirés de ceux
             # que l'agent déplace. Relus ici : le jeu peut changer d'une
             # session à l'autre sans relancer le fil.
-            raw_mandatory = cfg.get("mandatory_points") or []
+            # Aplatis par couples — entrée, sortie, entrée, sortie… — comme le
+            # détecteur rend déjà ses ``routing_points``. On les regroupe ici :
+            # les deux points d'une traversée sont solidaires, et les épingler
+            # séparément laisserait le câble entrer dans une encoche pour
+            # ressortir par une autre.
+            raw_mandatory = np.asarray(
+                cfg.get("mandatory_points") or [], dtype=np.float32
+            ).reshape(-1, 3)
+            usable = len(raw_mandatory) - len(raw_mandatory) % 2
             mandatory_points = (
-                np.asarray(raw_mandatory, dtype=np.float32).reshape(-1, 3)
-                if len(raw_mandatory) else None
+                raw_mandatory[:usable].reshape(-1, 2, 3) if usable else None
             )
             exploration_noise = cfg["exploration_noise_start"]
             local_pts = int(cfg["initial_points"])
@@ -462,7 +469,7 @@ def algo_worker(
 
             # Les passages imposés sont replacés avant tout calcul : l'agent
             # travaille donc sur une trajectoire qui les respecte déjà.
-            mandatory_locked = snap_mandatory_points(wp_current, mandatory_points)
+            mandatory_locked = snap_passages(wp_current, mandatory_points)
             if mandatory_locked:
                 new_waypoints = wp_current.copy()
 
@@ -984,7 +991,7 @@ def algo_worker(
             # Lissage, écrêtage et repli sur la meilleure solution ont pu tirer
             # le câble hors des encoches : on l'y remet. Les indices sont
             # recalculés, le raffinement adaptatif ayant pu en insérer.
-            snap_mandatory_points(smoothed_waypoints, mandatory_points)
+            snap_passages(smoothed_waypoints, mandatory_points)
 
             test_pts = get_segment_test_points(smoothed_waypoints, steps=10)
             with geom_lock:
@@ -1378,7 +1385,7 @@ def algo_worker(
             # Dernier épinglage : le raffinement adaptatif a pu insérer ou
             # retirer des points depuis le précédent, donc décaler les indices.
             # C'est cette trajectoire-ci qui est publiée et notée.
-            snap_mandatory_points(smoothed_waypoints, mandatory_points)
+            snap_passages(smoothed_waypoints, mandatory_points)
 
             # ==========================================================
             # 📋 RAPPORT DE CONFORMITÉ

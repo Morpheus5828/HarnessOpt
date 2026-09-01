@@ -712,6 +712,50 @@ class TestScanDeFixations:
         finally:
             page.show_fixation_scan(None)
 
+    @staticmethod
+    def _crossing(result, index=1):
+        """L'encoche que le trajet retiendrait sur ce peigne."""
+        from core.passage_route import Crossing
+
+        passage = result.passages[index]
+        return [Crossing(comb=passage.comb, passage=passage,
+                         entry=passage.p_in, exit=passage.p_out)]
+
+    def test_l_encoche_empruntee_est_marquee(self, app):
+        """Un peigne à treize encoches produit treize lignes identiques."""
+        page = app.pages[2]
+        result = self._result(3)
+        page.show_fixation_scan(result, self._crossing(result, index=1))
+        app.update()
+        try:
+            lignes = [w.cget("text") for w in page.scan_passages.winfo_children()]
+            marquees = [ligne for ligne in lignes if ligne.startswith("→")]
+            assert len(marquees) == 1, "une encoche empruntée par peigne"
+            assert "n° 2" in marquees[0]
+        finally:
+            page.show_fixation_scan(None)
+
+    def test_sans_choix_aucune_encoche_n_est_marquee(self, app):
+        """Avant la question posée à l'utilisateur, on ne préjuge de rien."""
+        page = app.pages[2]
+        page.show_fixation_scan(self._result(3))
+        app.update()
+        try:
+            lignes = [w.cget("text") for w in page.scan_passages.winfo_children()]
+            assert not any(ligne.startswith("→") for ligne in lignes)
+        finally:
+            page.show_fixation_scan(None)
+
+    def test_les_encoches_non_empruntees_restent_listees(self, app):
+        page = app.pages[2]
+        result = self._result(3)
+        page.show_fixation_scan(result, self._crossing(result, index=0))
+        app.update()
+        try:
+            assert len(page.scan_passages.winfo_children()) == 3
+        finally:
+            page.show_fixation_scan(None)
+
     def test_un_scan_impossible_est_explique(self, app):
         from core.fixation_scan import NO_OPEN3D, ScanResult
 

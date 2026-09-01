@@ -28,6 +28,7 @@ import numpy as np
 
 from core import paths
 from core import diagnostics, fixation_scan
+from core.passage_route import choose_crossings, describe as describe_crossings
 from core.orchestrator import ROLES, Orchestrator
 from core.routing_rules import ALL_RULES, ClearanceModel, HarnessSpec, RoutingRules
 
@@ -404,7 +405,20 @@ class AppController:
                 scan_result, bool(values.get("use_fixations", True))
             )
             use_fixations = bool(values["use_fixations"])
-            passages = self._passages_to_use(values)
+
+            # Une encoche par peigne, pas toutes : les autres encoches d'un
+            # peigne sont celles des faisceaux voisins. Le sens de traversée
+            # est choisi en même temps, p_in et p_out étant interchangeables.
+            crossings = self._crossings_to_use(values)
+            if crossings:
+                print(describe_crossings(crossings, self._combs_to_use(values)))
+                for crossing in crossings:
+                    print(f"   • {crossing.comb} — encoche n° "
+                          f"{crossing.passage.index + 1}"
+                          f"{' (sens inversé)' if crossing.flipped else ''}")
+                self._post(self._draw_fixations, scan_result, crossings)
+                self._post(self.view.pages[2].show_fixation_scan,
+                           scan_result, crossings)
 
             config["existing_crabes"] = [
                 {
@@ -423,10 +437,11 @@ class AppController:
             # Points que le câble doit traverser, épinglés par les agents à
             # chaque itération. L'attraction par récompense ne suffit pas :
             # elle rapproche le câble de l'encoche sans garantir qu'il y passe.
+            # Aplatis par couples — entrée, sortie, entrée, sortie… — comme le
+            # détecteur rend déjà ses ``routing_points``. C'est cette parité qui
+            # dit à l'agent quels points sont solidaires.
             config["mandatory_points"] = [
-                list(point)
-                for passage in passages
-                for point in (passage.p_in, passage.p_out)
+                point for crossing in crossings for point in crossing.points
             ]
 
             self.shared_state = {
@@ -536,7 +551,14 @@ class AppController:
                 # Traversée d'une encoche : une ligne droite, sans détour. Y
                 # appliquer une recherche de chemin ferait contourner le peigne
                 # au lieu de passer dedans.
-                segment = np.linspace(a, b, share, dtype=np.float32)
+                #
+                # Exactement deux points, et non la part de budget calculée
+                # au-dessus : l'entrée et la sortie sont **solidaires**, et les
+                # poser sur deux points consécutifs du câble est la seule
+                # manière de garantir qu'aucun point intermédiaire ne vienne
+                # s'intercaler dans l'encoche. Accessoirement, une traversée de
+                # 5 cm cesse ainsi de consommer quatre points du faisceau.
+                segment = np.linspace(a, b, 2, dtype=np.float32)
             else:
                 segment, message = self._plan_segment(mesh, rules, values, a, b, share)
                 if segment is None:
@@ -559,42 +581,53 @@ class AppController:
         """Étapes imposées du trajet, de A à B, et tronçons à laisser droits.
 
         Sans fixations à emprunter, le trajet n'a que deux étapes. Avec, chaque
-        encoche ajoute son couple entrée/sortie, ordonné le long de A→B et
-        orienté dans le sens de la marche : entrer par la sortie d'une encoche
-        obligerait le câble à faire demi-tour dedans.
+        **peigne** ajoute une étape : le couple entrée/sortie de l'encoche
+        retenue. Un peigne n'en fournit qu'une, quel que soit son nombre
+        d'encoches — les autres sont celles des faisceaux voisins.
         """
         a = np.asarray(self.point_a, dtype=np.float64)
         b = np.asarray(self.point_b, dtype=np.float64)
 
-        passages = self._passages_to_use(values)
-        if not passages:
+        crossings = self._crossings_to_use(values)
+        if not crossings:
             return [a, b], set()
-
-        direction = b - a
-        norm = float(np.linalg.norm(direction))
-        direction = direction / norm if norm > 1e-9 else np.array([1.0, 0.0, 0.0])
-
-        ordered = sorted(
-            passages,
-            key=lambda p: float(np.dot(np.asarray(p.center) - a, direction)),
-        )
 
         nodes = [a]
         forced_straight = set()
-        for passage in ordered:
-            p_in = np.asarray(passage.p_in, dtype=np.float64)
-            p_out = np.asarray(passage.p_out, dtype=np.float64)
-            # Le côté par lequel on entre est celui qu'on rencontre en premier.
-            if np.dot(p_out - p_in, direction) < 0:
-                p_in, p_out = p_out, p_in
-            nodes.append(p_in)
-            forced_straight.add(len(nodes) - 1)  # tronçon p_in -> p_out
-            nodes.append(p_out)
+        for crossing in crossings:
+            nodes.append(np.asarray(crossing.entry, dtype=np.float64))
+            forced_straight.add(len(nodes) - 1)  # tronçon entrée -> sortie
+            nodes.append(np.asarray(crossing.exit, dtype=np.float64))
         nodes.append(b)
         return nodes, forced_straight
 
+    def _combs_to_use(self, values):
+        """Peignes dont une encoche doit être empruntée.
+
+        Un peigne, ici, c'est une fixation détectée avec ses encoches. Les
+        regrouper est indispensable : c'est en les traitant à plat que le
+        trajet finissait par faire la navette d'une encoche à sa voisine.
+        """
+        if not values.get("use_fixations", False):
+            return []
+        result = getattr(self, "scan_result", None)
+        if result is None or not result.ran:
+            return []
+        return [list(f.passages) for f in result.fixations if f.passages]
+
+    def _crossings_to_use(self, values):
+        """Encoches retenues, une par peigne, dans le sens qui sert le trajet."""
+        combs = self._combs_to_use(values)
+        if not combs:
+            return []
+        return choose_crossings(self.point_a, self.point_b, combs)
+
     def _passages_to_use(self, values):
-        """Passages imposés à emprunter, selon le choix de l'utilisateur."""
+        """Toutes les encoches détectées, pour l'affichage et le décompte.
+
+        À ne pas confondre avec :meth:`_crossings_to_use` : celles-ci sont
+        *proposées*, une seule par peigne sera *empruntée*.
+        """
         if not values.get("use_fixations", False):
             return []
         result = getattr(self, "scan_result", None)
@@ -884,7 +917,7 @@ class AppController:
         self._post(self.view.pages[2].set_use_fixations, answer["value"])
         return bool(answer["value"])
 
-    def _draw_fixations(self, scan_result):
+    def _draw_fixations(self, scan_result, crossings=None):
         """Place les fixations reconnues dans la vue 3D.
 
         Rien ne les dessinait : le viewer savait masquer les acteurs
@@ -895,6 +928,12 @@ class AppController:
         est matérialisé par son entrée (vert), sa sortie (rouge) et le segment
         que le câble doit emprunter (jaune) — les mêmes couleurs que dans la
         liste affichée au-dessus de la vue.
+
+        Une fois les encoches choisies (``crossings``), seules celles qui sont
+        **réellement empruntées** gardent ces couleurs : les autres passent en
+        gris et s'amincissent. Sans cette distinction, l'utilisateur verrait
+        treize encoches allumées sur un peigne et n'aurait aucun moyen de
+        savoir par laquelle le câble passe.
         """
         if self.viewer is None or not self.viewer.is_available:
             return
@@ -920,13 +959,22 @@ class AppController:
                     radius=radius * 1.2, color="#8FA3B8",
                 )
 
+        retained = {(c.comb, c.passage.index) for c in (crossings or ())}
         for index, passage in enumerate(scan_result.passages):
-            self.viewer.show_sphere(passage.p_in, f"fixation_in_{index}",
-                                    radius=radius, color="#1E9E5A")
-            self.viewer.show_sphere(passage.p_out, f"fixation_out_{index}",
-                                    radius=radius, color="#D93A45")
-            self.viewer.show_path([passage.p_in, passage.p_out],
-                                  f"fixation_slot_{index}", color="#E5B300", width=9)
+            used = crossings is None or (passage.comb, passage.index) in retained
+            if used:
+                self.viewer.show_sphere(passage.p_in, f"fixation_in_{index}",
+                                        radius=radius, color="#1E9E5A")
+                self.viewer.show_sphere(passage.p_out, f"fixation_out_{index}",
+                                        radius=radius, color="#D93A45")
+                self.viewer.show_path([passage.p_in, passage.p_out],
+                                      f"fixation_slot_{index}",
+                                      color="#E5B300", width=9)
+            else:
+                # Encoche reconnue mais laissée aux faisceaux voisins.
+                self.viewer.show_path([passage.p_in, passage.p_out],
+                                      f"fixation_slot_{index}",
+                                      color="#6C7A89", width=3)
         self.viewer.render()
 
     @staticmethod
