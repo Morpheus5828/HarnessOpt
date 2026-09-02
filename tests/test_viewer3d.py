@@ -21,37 +21,6 @@ from ui import viewer3d as v3  # noqa: E402
 
 
 # ----------------------------------------------------------------------
-# Désignation par clic — fonction pure
-# ----------------------------------------------------------------------
-
-CIBLES = [("a", (0.0, 0.0, 0.0)), ("b", (500.0, 0.0, 0.0)), ("c", (0.0, 500.0, 0.0))]
-
-
-def test_un_clic_designe_le_repere_le_plus_proche():
-    assert v3.nearest_target((480.0, 10.0, 0.0), CIBLES) == "b"
-
-
-def test_un_clic_loin_de_tout_ne_designe_rien():
-    """Un clic de rotation manqué ne doit pas basculer un choix."""
-    assert v3.nearest_target((5000.0, 5000.0, 0.0), CIBLES) is None
-
-
-def test_la_tolerance_commande_la_portee():
-    point = (100.0, 0.0, 0.0)
-    assert v3.nearest_target(point, CIBLES, tolerance_mm=50.0) is None
-    assert v3.nearest_target(point, CIBLES, tolerance_mm=150.0) == "a"
-
-
-def test_sans_repere_rien_n_est_designe():
-    assert v3.nearest_target((0.0, 0.0, 0.0), []) is None
-    assert v3.nearest_target(None, CIBLES) is None
-
-
-def test_un_point_mal_forme_ne_leve_pas():
-    assert v3.nearest_target((0.0, 0.0), CIBLES) is None
-
-
-# ----------------------------------------------------------------------
 # Le fil de rendu, avec un plotter factice
 # ----------------------------------------------------------------------
 
@@ -94,7 +63,6 @@ class FakePlotter:
         self.updates = 0
         self.shown = False
         self.widgets = None
-        self.picking = None
 
     # -- ce que le fil appelle -------------------------------------
     def set_background(self, *_a, **_k):
@@ -124,9 +92,6 @@ class FakePlotter:
     def close(self):
         self._closed = True
 
-    def enable_point_picking(self, callback=None, **_kwargs):
-        self.picking = callback
-
     def clear_sphere_widgets(self):
         self.widgets = None
 
@@ -142,7 +107,7 @@ class FakePlotter:
 @pytest.fixture
 def thread(monkeypatch):
     """Fil de rendu réel, branché sur un plotter factice."""
-    ready, states, picks, moves = [], [], [], []
+    ready, states, moves = [], [], []
 
     monkeypatch.setattr(v3._RenderThread, "_probe_import", staticmethod(lambda: None))
 
@@ -156,7 +121,6 @@ def thread(monkeypatch):
         self.plotter.show()
         self._exited = False
         self._observe_exit()
-        self._install_picking()
         self._install_handles()
         self._on_window_state(True)
 
@@ -164,7 +128,6 @@ def thread(monkeypatch):
     th = v3._RenderThread(
         on_ready=lambda ok, err: ready.append((ok, err)),
         on_window_state=states.append,
-        on_pick=picks.append,
         on_handle_move=lambda i, p: moves.append((i, p)),
         size=(320, 240),
     )
@@ -173,7 +136,7 @@ def thread(monkeypatch):
         if ready:
             break
         time.sleep(0.01)
-    yield th, ready, states, picks, moves
+    yield th, ready, states, moves
     th.stop()
     th.join(timeout=2)
 
@@ -193,13 +156,13 @@ def ouvre(th):
 
 
 def test_le_fil_signale_qu_il_est_pret(thread):
-    th, ready, _, _, _ = thread
+    th, ready, _, _ = thread
     assert ready and ready[0][0] is True
 
 
 def test_la_scene_vit_sans_fenetre(thread):
     """Les ordres sont acceptés fenêtre fermée : la scène est mémorisée."""
-    th, _, _, _, _ = thread
+    th, _, _, _ = thread
     th.orders.put(("add", (object(), "dmu"), {"color": "grey"}))
     drain(th)
     assert "dmu" in th.recipes
@@ -207,7 +170,7 @@ def test_la_scene_vit_sans_fenetre(thread):
 
 
 def test_la_scene_est_rejouee_a_l_ouverture(thread):
-    th, _, _, _, _ = thread
+    th, _, _, _ = thread
     th.orders.put(("add", (object(), "dmu"), {"color": "grey"}))
     th.orders.put(("add", (object(), "traj"), {"color": "blue"}))
     drain(th)
@@ -216,7 +179,7 @@ def test_la_scene_est_rejouee_a_l_ouverture(thread):
 
 
 def test_un_acteur_retire_disparait_des_deux_cotes(thread):
-    th, _, _, _, _ = thread
+    th, _, _, _ = thread
     th.orders.put(("add", (object(), "dmu"), {}))
     drain(th)
     plotter = ouvre(th)
@@ -227,7 +190,7 @@ def test_un_acteur_retire_disparait_des_deux_cotes(thread):
 
 
 def test_un_ordre_inconnu_ne_tue_pas_le_fil(thread):
-    th, _, _, _, _ = thread
+    th, _, _, _ = thread
     th.orders.put(("nexiste_pas", (), {}))
     th.orders.put(("add", (object(), "dmu"), {}))
     drain(th)
@@ -235,7 +198,7 @@ def test_un_ordre_inconnu_ne_tue_pas_le_fil(thread):
 
 
 def test_un_ordre_qui_echoue_ne_tue_pas_le_fil(thread):
-    th, _, _, _, _ = thread
+    th, _, _, _ = thread
     ouvre(th)
     th.orders.put(("add", (object(),), {}))      # nom manquant
     th.orders.put(("add", (object(), "ok"), {}))
@@ -249,7 +212,7 @@ def test_un_ordre_qui_echoue_ne_tue_pas_le_fil(thread):
 
 def test_une_fenetre_fermee_n_est_plus_rafraichie(thread):
     """Le défaut : VTK dessine dans un contexte détruit et crache des shaders."""
-    th, _, _, _, _ = thread
+    th, _, _, _ = thread
     plotter = ouvre(th)
     for _ in range(50):
         if plotter.updates > 0:
@@ -266,7 +229,7 @@ def test_une_fenetre_fermee_n_est_plus_rafraichie(thread):
 
 def test_la_fermeture_est_detectee_sans_exception(thread):
     """VTK ne lève pas : c'est à nous de le demander."""
-    th, _, states, _, _ = thread
+    th, _, states, _ = thread
     plotter = ouvre(th)
     plotter.ferme_par_l_utilisateur()
     end = time.time() + 2
@@ -277,7 +240,7 @@ def test_la_fermeture_est_detectee_sans_exception(thread):
 
 
 def test_les_autres_signaux_de_fermeture_sont_lus(thread):
-    th, _, _, _, _ = thread
+    th, _, _, _ = thread
 
     plotter = ouvre(th)
     plotter._closed = True
@@ -294,7 +257,7 @@ def test_les_autres_signaux_de_fermeture_sont_lus(thread):
 
 def test_l_evenement_de_sortie_est_observe(thread):
     """C'est le signal que VTK émet quand l'utilisateur clique la croix."""
-    th, _, _, _, _ = thread
+    th, _, _, _ = thread
     plotter = ouvre(th)
     evenements = [event for event, _ in plotter.iren.observers]
     assert "ExitEvent" in evenements
@@ -306,7 +269,7 @@ def test_l_evenement_de_sortie_est_observe(thread):
 
 def test_la_fenetre_se_rouvre_avec_sa_scene(thread):
     """Fermer n'est pas perdre : la scène est décrite, pas dessinée."""
-    th, _, _, _, _ = thread
+    th, _, _, _ = thread
     th.orders.put(("add", (object(), "dmu"), {}))
     drain(th)
     plotter = ouvre(th)
@@ -318,7 +281,7 @@ def test_la_fenetre_se_rouvre_avec_sa_scene(thread):
 
 
 def test_l_arret_ferme_le_plotter(thread):
-    th, _, _, _, _ = thread
+    th, _, _, _ = thread
     plotter = ouvre(th)
     th.stop()
     th.join(timeout=2)
@@ -334,7 +297,6 @@ def test_pyvista_absent_est_signale_sans_exception(monkeypatch):
     ready = []
     th = v3._RenderThread(on_ready=lambda ok, err: ready.append((ok, err)),
                           on_window_state=lambda _s: None,
-                          on_pick=lambda _k: None,
                           on_handle_move=lambda _i, _p: None,
                           size=(320, 240))
     th.start()
@@ -345,29 +307,11 @@ def test_pyvista_absent_est_signale_sans_exception(monkeypatch):
 
 
 # ----------------------------------------------------------------------
-# Clic et poignées
+# Poignées déplaçables
 # ----------------------------------------------------------------------
 
-def test_un_clic_sur_un_repere_est_transmis(thread):
-    th, _, _, picks, _ = thread
-    th.orders.put(("set_pick_targets", (CIBLES, 120.0), {}))
-    drain(th)
-    plotter = ouvre(th)
-    assert plotter.picking is not None
-    plotter.picking((10.0, 0.0, 0.0))
-    assert picks == ["a"]
-
-
-def test_un_clic_dans_le_vide_ne_transmet_rien(thread):
-    th, _, _, picks, _ = thread
-    th.orders.put(("set_pick_targets", (CIBLES, 120.0), {}))
-    drain(th)
-    ouvre(th).picking((9000.0, 0.0, 0.0))
-    assert picks == []
-
-
 def test_les_poignees_sont_posees_sur_les_points_demandes(thread):
-    th, _, _, _, _ = thread
+    th, _, _, _ = thread
     points = [[0.0, 0.0, 0.0], [100.0, 0.0, 0.0]]
     th.orders.put(("set_handles", (points, 25.0), {}))
     drain(th)
@@ -378,7 +322,7 @@ def test_les_poignees_sont_posees_sur_les_points_demandes(thread):
 
 
 def test_une_poignee_deplacee_est_transmise(thread):
-    th, _, _, _, moves = thread
+    th, _, _, moves = thread
     th.orders.put(("set_handles", ([[0.0, 0.0, 0.0], [100.0, 0.0, 0.0]], 25.0), {}))
     drain(th)
     callback, _ = ouvre(th).widgets
@@ -387,7 +331,7 @@ def test_une_poignee_deplacee_est_transmise(thread):
 
 
 def test_vider_les_poignees_les_retire(thread):
-    th, _, _, _, _ = thread
+    th, _, _, _ = thread
     th.orders.put(("set_handles", ([[0.0, 0.0, 0.0]], 25.0), {}))
     drain(th)
     plotter = ouvre(th)

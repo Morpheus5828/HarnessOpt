@@ -18,7 +18,6 @@ from core.passage_route import (
     Crossing,
     choose_crossings,
     comb_center,
-    default_selection,
     describe,
     detour_ratio,
     filter_combs,
@@ -280,72 +279,20 @@ def test_la_largeur_du_couloir_est_celle_annoncee():
 
 
 # ----------------------------------------------------------------------
-# Le choix de l'utilisateur
+# Le choix proposé n'est pas une décision
 # ----------------------------------------------------------------------
 
-def test_l_utilisateur_impose_son_encoche():
-    combs = [peigne("A", 1000.0, n=5)]
-    crossings = choose_crossings((0, 0, 0), (2000, 0, 0), combs, selection={"A": 3})
-    assert crossings[0].passage.index == 3
+def test_le_choix_sert_a_batir_le_chemin_de_depart():
+    """Une encoche par peigne suffit à poser les étapes du premier tracé."""
+    combs = [peigne("A", 700.0, n=4), peigne("B", 1300.0, n=4)]
+    crossings = choose_crossings((0, 0, 0), (2000, 0, 0), combs)
+    assert len(crossings) == 2
+    assert {c.comb for c in crossings} == {"A", "B"}
 
 
-def test_le_sens_reste_calcule_sur_une_encoche_imposee():
-    """Il n'a aucune conséquence physique : l'utilisateur n'a pas à s'en occuper."""
-    passage = Passage(index=0, p_in=(1000.0, 0.0, 0.0), p_out=(1000.0, 0.0, 100.0),
-                      comb="A")
-    haut = choose_crossings((0, 0, 0), (2000, 0, 500), [[passage]], selection={"A": 0})
-    bas = choose_crossings((0, 0, 0), (2000, 0, -500), [[passage]], selection={"A": 0})
-    assert haut[0].exit == passage.p_out
-    assert bas[0].exit == passage.p_in
-
-
-def test_un_peigne_refuse_par_l_utilisateur_est_ignore():
-    combs = [peigne("A", 700.0), peigne("B", 1300.0)]
-    crossings = choose_crossings((0, 0, 0), (2000, 0, 0), combs, selection={"A": None})
-    assert [c.comb for c in crossings] == ["B"]
-
-
-def test_un_peigne_absent_du_choix_reste_calcule():
-    combs = [peigne("A", 700.0), peigne("B", 1300.0)]
-    crossings = choose_crossings((0, 0, 0), (2000, 0, 0), combs, selection={"A": 2})
-    assert [c.comb for c in crossings] == ["A", "B"]
-    assert crossings[0].passage.index == 2
-
-
-def test_tout_refuser_ne_laisse_aucune_traversee():
-    combs = [peigne("A", 700.0), peigne("B", 1300.0)]
-    assert choose_crossings((0, 0, 0), (2000, 0, 0), combs,
-                            selection={"A": None, "B": None}) == []
-
-
-def test_une_encoche_inconnue_retombe_sur_le_calcul():
-    """Un choix périmé ne doit pas faire disparaître le peigne en silence."""
-    combs = [peigne("A", 1000.0, n=3)]
-    crossings = choose_crossings((0, 0, 0), (2000, 0, 0), combs, selection={"A": 99})
+def test_toutes_les_encoches_restent_disponibles():
+    """C'est l'agent qui tranche ensuite, parmi toutes les candidates."""
+    combs = [peigne("A", 700.0, n=4)]
+    crossings = choose_crossings((0, 0, 0), (2000, 0, 0), combs)
     assert len(crossings) == 1
-
-
-def test_le_choix_propose_est_celui_que_l_application_retiendrait():
-    combs = [peigne("A", 700.0, n=4), peigne("B", 1300.0, n=4)]
-    crossings = choose_crossings((0, 0, 0), (2000, 0, 0), combs)
-    propose = default_selection(combs, crossings)
-    assert set(propose) == {"A", "B"}
-    assert propose == {c.comb: c.passage.index for c in crossings}
-
-
-def test_le_choix_propose_se_rejoue_a_l_identique():
-    """Ce qui est proposé doit être exactement ce qu'on peut modifier."""
-    combs = [peigne("A", 700.0, n=4), peigne("B", 1300.0, n=4)]
-    crossings = choose_crossings((0, 0, 0), (2000, 0, 0), combs)
-    rejoue = choose_crossings((0, 0, 0), (2000, 0, 0), combs,
-                              selection=default_selection(combs, crossings))
-    assert [(c.comb, c.passage.index) for c in rejoue] \
-        == [(c.comb, c.passage.index) for c in crossings]
-
-
-def test_un_peigne_hors_zone_n_est_pas_proposable():
-    loin = [Passage(index=0, p_in=(1000.0, 9000.0, 0.0),
-                    p_out=(1000.0, 9000.0, 20.0), comb="loin")]
-    combs = filter_combs((0, 0, 0), (2000, 0, 0), [peigne("proche", 1000.0), loin])
-    assert set(default_selection(combs, choose_crossings((0, 0, 0), (2000, 0, 0), combs))) \
-        == {"proche"}
+    assert len(combs[0]) == 4, "le peigne garde ses quatre encoches"
