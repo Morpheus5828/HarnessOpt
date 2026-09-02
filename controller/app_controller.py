@@ -123,6 +123,13 @@ class AppController:
         self._handle_indices: list = []
         self._initial_path = None
 
+        self._metric_history = {
+            "clashes": {"min": float("inf"), "max": 0, "prev": None},
+            "clearance": {"min": float("inf"), "max": 0, "prev": None},
+            "bend": {"min": float("inf"), "max": 0, "prev": None},
+            "length": {"min": float("inf"), "max": 0, "prev": None},
+        }
+
     # ==================================================================
     # Étape 1 : extraction
     # ==================================================================
@@ -485,9 +492,15 @@ class AppController:
             # peigne : l'agent retient à chaque tour celle dont il est le plus
             # proche, donc c'est bien lui qui choisit — le calcul de départ ne
             # fait que proposer un point d'entrée pour bâtir le premier tracé.
-            config["mandatory_combs"] = [
+            """config["mandatory_combs"] = [
                 [[list(passage.p_in), list(passage.p_out)] for passage in comb]
                 for comb in (combs if use_fixations else [])
+            ]"""
+
+            chosen_crossings = self._crossings_to_use(values) if use_fixations else []
+            config["mandatory_combs"] = [
+                [[list(c.entry), list(c.exit)]]
+                for c in chosen_crossings
             ]
 
             # Fixations sans encoche : un point, pas une traversée. Même
@@ -555,6 +568,20 @@ class AppController:
             self.is_scanning = False
 
             with self.data_lock:
+                # Vérification de sécurité si le calcul a été annulé en cours de préparation
+                if self.shared_state is None:
+                    self.is_scanning = False
+                    self._post(self.view.pages[2].set_running_state, "idle")
+                    return
+
+                self.supervisor = TeamSupervisor(
+                    self.orchestrator, self.shared_state, self.data_lock,
+                    period_s=1.0, lang=self.view.t.lang,
+                )
+                self.supervisor.start()
+
+                self.threads_started = True
+                self.is_scanning = False
                 self.shared_state["is_playing"] = True
 
             self._post(self._setup_charts)
@@ -653,13 +680,22 @@ class AppController:
         forced_straight = set()
         for anchor in anchors:
             if isinstance(anchor, Crossing):
-                nodes.append(np.asarray(anchor.entry, dtype=np.float64))
-                forced_straight.add(len(nodes) - 1)  # tronçon entrée -> sortie
-                nodes.append(np.asarray(anchor.exit, dtype=np.float64))
-            else:
-                # Une fixation simple impose un point, pas une traversée : le
-                # tracé doit y passer, il n'a rien à y franchir.
-                nodes.append(np.asarray(anchor, dtype=np.float64))
+                entry = np.asarray(anchor.entry, dtype=np.float64)
+                exit_p = np.asarray(anchor.exit, dtype=np.float64)
+
+                # Vecteur direction de traversée (p_in -> p_out)
+                vec_dir = exit_p - entry
+                norm_dir = np.linalg.norm(vec_dir)
+                dir_unit = vec_dir / norm_dir if norm_dir > 1e-6 else np.array([0, 0, -1])
+
+                # Prolongement garanti de 40 mm dans l'axe de la fixation
+                extended_exit = exit_p + dir_unit * 40.0
+
+                nodes.append(entry)
+                forced_straight.add(len(nodes) - 1)  # Entrée -> Sortie
+                nodes.append(exit_p)
+                forced_straight.add(len(nodes) - 1)  # Sortie -> Prolongement droit (40 mm)
+                nodes.append(extended_exit)
         nodes.append(b)
         return nodes, forced_straight
 
@@ -1208,31 +1244,111 @@ class AppController:
         if self.shared_state is not None:
             with self.data_lock:
                 algos = dict(self.shared_state.get("algos") or {})
-            ranking = [name for name in algos]
-            if self._best_scores:
-                ranking.sort(key=lambda n: self._best_scores.get(n, float("inf")))
+                team = dict(self.shared_state.get("team") or {})
+
+            # 1. On utilise le classement officiel de l'équipe s'il existe
+            ranking = team.get("ranking") or list(algos)
+
+            # 2. Sinon, on trie les agents selon leur score dans 'algos'
+            if not team.get("ranking"):
+                ranking.sort(
+                    key=lambda n: algos.get(n, {}).get("score", float("inf"))
+                    if algos.get(n, {}).get("score") is not None
+                    else float("inf")
+                )
+
             for name in ranking:
                 points = algos.get(name, {}).get("waypoints")
                 if points is not None and len(points) > 2:
                     best = points
                     break
+
         if best is None:
             best = self._initial_path
         return best
 
     def _on_handle_moved(self, index: int, point):
-        """Une poignée vient d'être déplacée : le point devient imposé.
-
-        La mécanique existe déjà — c'est celle des encoches. Un point imposé
-        est replacé à chaque itération puis retiré de ceux que l'agent peut
-        bouger : l'agent optimise donc autour de la décision de l'utilisateur
-        au lieu de la défaire.
-        """
+        """Met à jour une poignée et reconstruit la trajectoire fluide (Ligne Jaune)."""
         if not self.manual_editing:
             return
-        self.pinned_points[int(index)] = [float(c) for c in point]
+
+        idx_int = int(index)
+        self.pinned_points[idx_int] = [float(c) for c in point]
         self._publish_pinned()
+
+        # Reconstruire le câble sous forme de ligne fluide A -> P1 -> P2 ... -> PN -> B
+        self._smooth_repath_from_handles()
         self.view.set_status(self.t("routing.view.edit.pinned"), "ok")
+
+    def _smooth_repath_from_handles(self):
+        """Reconstruit une trajectoire tendue MAIS adoucie aux ancres pour respecter le cintrage."""
+        if self.shared_state is None or self.point_a is None or self.point_b is None:
+            return
+
+        # 1. Points de contrôle : A -> Poignées violettes -> B
+        ctrl_points = [np.asarray(self.point_a, dtype=np.float32)]
+        for idx in sorted(self.pinned_points.keys()):
+            ctrl_points.append(np.asarray(self.pinned_points[idx], dtype=np.float32))
+        ctrl_points.append(np.asarray(self.point_b, dtype=np.float32))
+        ctrl_points = np.array(ctrl_points, dtype=np.float32)
+
+        if len(ctrl_points) < 2:
+            return
+
+        n_total_points = self.shared_state["config"].get("initial_points", 60)
+
+        # 2. Construction d'un tracé adouci aux coins (Congé Bézier aux sommets)
+        dense_pts = []
+        radius_corner_mm = self.rules.harness.min_bend_radius_mm if self.rules else 150.0
+
+        for i in range(len(ctrl_points) - 1):
+            p_start = ctrl_points[i]
+            p_end = ctrl_points[i + 1]
+
+            if i == 0:
+                dense_pts.append(p_start)
+
+            # Si coin intermédiaire (sphère violette), adoucir par un arc de Bézier
+            if 0 < i < len(ctrl_points) - 1:
+                p_prev = ctrl_points[i - 1]
+                p_curr = ctrl_points[i]
+                p_next = ctrl_points[i + 1]
+
+                v1 = p_prev - p_curr
+                v2 = p_next - p_curr
+                len1, len2 = np.linalg.norm(v1), np.linalg.norm(v2)
+
+                if len1 > 1e-3 and len2 > 1e-3:
+                    u1, u2 = v1 / len1, v2 / len2
+                    # Reculer proportionnellement au rayon autorisé pour adoucir le virage
+                    cut_dist = min(radius_corner_mm * 0.4, len1 * 0.35, len2 * 0.35)
+                    pt_in = p_curr + u1 * cut_dist
+                    pt_out = p_curr + u2 * cut_dist
+
+                    # Bézier quadratique pour arrondir le sommet sans angle vif
+                    for t_val in np.linspace(0.0, 1.0, 5):
+                        pt_arc = (1 - t_val)**2 * pt_in + 2 * (1 - t_val) * t_val * p_curr + t_val**2 * pt_out
+                        dense_pts.append(pt_arc)
+            else:
+                dense_pts.append(p_end)
+
+        dense_pts = np.array(dense_pts, dtype=np.float32)
+
+        # 3. Ré-échantillonnage régulier le long de l'arc
+        segs = np.linalg.norm(np.diff(dense_pts, axis=0), axis=1)
+        total_len = np.sum(segs) or 1.0
+        cum_len = np.insert(np.cumsum(segs), 0, 0.0)
+
+        target_lens = np.linspace(0.0, total_len, n_total_points)
+        new_wps = np.zeros((n_total_points, 3), dtype=np.float32)
+        for dim in range(3):
+            new_wps[:, dim] = np.interp(target_lens, cum_len, dense_pts[:, dim])
+
+        # 4. Injecter la trajectoire adoucie dans tous les agents
+        with self.data_lock:
+            for name in self.shared_state.get("algos", {}):
+                self.shared_state["algos"][name]["waypoints"] = new_wps.copy()
+                self.shared_state["algos"][name]["prev_disp"] = None
 
     def _publish_pinned(self, config=None):
         """Transmet les points imposés aux agents, sans relancer le calcul.
@@ -1319,35 +1435,123 @@ class AppController:
         self._refresh_job = self.view.after(delay, self._refresh)
 
     def _draw_paths(self, snapshot: dict):
-        """Redessine les trajectoires qui ont bougé, et elles seules.
-
-        Reconstruire les cinq tubes à chaque rafraîchissement coûtait 20 ms par
-        appel, soit 8 % du fil principal à 4 Hz, pour redessiner le plus
-        souvent des trajectoires identiques : un agent ne bouge pas à chaque
-        cycle d'affichage.
-        """
+        """Affiche UNIQUEMENT le meilleur agent (Leader) pour supprimer le sac de nœuds."""
         if self.viewer is None or not self.viewer.is_available:
             return
-        changed = False
-        for name, state in snapshot.items():
+
+        # 1. Nettoyer TOUS les anciens tracés des agents
+        self.viewer.remove_prefix("traj_")
+
+        # 2. Récupérer le classement officiel (Leader en index 0)
+        with self.data_lock:
+            team = dict(self.shared_state.get("team", {}) or {}) if self.shared_state else {}
+        ranking = team.get("ranking") or list(snapshot)
+
+        best_name = ranking[0] if ranking else None
+
+        # 3. Dessiner exclusivement le meilleur tracé
+        if best_name and best_name in snapshot:
+            state = snapshot[best_name]
             points = state.get("waypoints")
-            if points is None:
-                continue
-            signature = (state.get("iteration"), len(points))
-            if self._path_signatures.get(name) == signature:
-                continue
-            self._path_signatures[name] = signature
-            entry = self.benchmark_algos.get(name, {})
-            self.viewer.show_path(
-                points, f"traj_{name}",
-                color=entry.get("color", "#2D7FF9"), width=7,
-            )
-            changed = True
-        if changed:
-            # Les poignées suivent le tracé : laissées où elles étaient, elles
-            # désigneraient un point que le câble a quitté.
-            self._refresh_handles()
-            self.viewer.render()
+            if points is not None and len(points) >= 2:
+                self.viewer.show_path(
+                    points, f"traj_{best_name}",
+                    color="#1E9E5A",  # Vert ou Bleu uni pour le Leader
+                    width=8,
+                )
+
+        self._refresh_handles()
+        self.viewer.render()
+
+    def _compute_metric_trends(self, kpis: dict) -> dict:
+        """Calcule Min, Max et émojis de tendance (↗️ ↘️ ➡️) pour chaque contrainte."""
+        results = {}
+
+        metrics_map = {
+            "clashes": (float(kpis.get("n_clashes", 0)), False),  # False = Baisse souhaitée
+            "clearance": (float(kpis.get("min_dist_mm", 0)), True),  # True = Hausse souhaitée
+            "bend": (float(kpis.get("min_bend_radius_mm", 0)), True),
+            "length": (float(kpis.get("length_mm", 0)), False),
+        }
+
+        for key, (val, higher_is_better) in metrics_map.items():
+            hist = self._metric_history[key]
+
+            # Mise à jour Min / Max
+            if val < hist["min"]: hist["min"] = val
+            if val > hist["max"]: hist["max"] = val
+
+            # Calcul de la tendance par rapport à l'itération précédente
+            prev = hist["prev"]
+            if prev is None or abs(val - prev) < 1e-2:
+                emoji = "➡️"
+                status_color = "neutral"
+            elif val > prev:
+                emoji = "📈 ↗️" if higher_is_better else "📉 ↗️"
+                status_color = "ok" if higher_is_better else "danger"
+            else:
+                emoji = "📉 ↘️" if not higher_is_better else "📈 ↘️"
+                status_color = "ok" if not higher_is_better else "danger"
+
+            hist["prev"] = val
+
+            # Formatage : Actuel (Min: X | Max: Y) Emoji
+            min_str = "0" if hist["min"] == float("inf") else f"{hist['min']:.1f}"
+            max_str = f"{hist['max']:.1f}"
+
+            results[key] = {
+                "display": f"{val:.1f} (min: {min_str} | max: {max_str}) {emoji}",
+                "color": status_color
+            }
+
+        return results
+
+    def _compute_metric_trends(self, kpis: dict) -> dict:
+        """Calcule Min, Max et émojis de tendance (↗️ ↘️ ➡️) pour chaque contrainte."""
+        results = {}
+
+        metrics_map = {
+            "clashes": (float(kpis.get("n_clashes", 0)), False),  # Baisse = Amélioration
+            "clearance": (float(kpis.get("min_dist_mm", 0)), True),  # Hausse = Amélioration
+            "bend": (float(kpis.get("min_bend_radius_mm", 0)), True),  # Hausse = Amélioration
+            "length": (float(kpis.get("length_mm", 0)), False),  # Baisse = Amélioration
+        }
+
+        for key, (val, higher_is_better) in metrics_map.items():
+            hist = self._metric_history.get(key)
+            if not hist:
+                hist = {"min": float("inf"), "max": 0, "prev": None}
+                self._metric_history[key] = hist
+
+            # Mise à jour Min / Max
+            if val < hist["min"]:
+                hist["min"] = val
+            if val > hist["max"]:
+                hist["max"] = val
+
+            # Calcul de la tendance
+            prev = hist["prev"]
+            if prev is None or abs(val - prev) < 1e-2:
+                emoji = "➡️"
+                status_color = "neutral"
+            elif val > prev:
+                emoji = "📈 ↗️" if higher_is_better else "📉 ↗️"
+                status_color = "ok" if higher_is_better else "danger"
+            else:
+                emoji = "📉 ↘️" if not higher_is_better else "📈 ↘️"
+                status_color = "ok" if not higher_is_better else "danger"
+
+            hist["prev"] = val
+
+            min_str = "0.0" if hist["min"] == float("inf") else f"{hist['min']:.1f}"
+            max_str = f"{hist['max']:.1f}"
+
+            results[key] = {
+                "display": f"{val:.1f} (min: {min_str} | max: {max_str}) {emoji}",
+                "color": status_color,
+            }
+
+        return results
 
     def _update_page(self, snapshot: dict, team: dict):
         # Avant tout affichage : ce qui sera rendu à l'utilisateur n'est pas le
@@ -1402,9 +1606,14 @@ class AppController:
                 }
             )
 
+        trends = {}
+        if best_state.get("report") is not None:
+            trends = self._compute_metric_trends(best_state["report"].kpis)
+
         self.view.pages[2].update_live(
             {
                 "report": best_state.get("report"),
+                "trends": trends,
                 "valid": self._valid_summary(),
                 "has_valid": self.best_valid is not None,
                 "iteration": best_state.get("iteration"),
