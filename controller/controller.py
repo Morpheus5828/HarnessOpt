@@ -67,6 +67,8 @@ class AppController:
         self.is_typing = False
         self.is_scanning = False
 
+
+
         self._render_suspended = False
         self._render_resume_after_id = None
         self._loop_busy = False
