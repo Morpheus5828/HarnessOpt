@@ -161,7 +161,7 @@ def test_fixations_et_points_manuels_partagent_la_meme_liste():
     """L'agent n'a pas à savoir d'où vient une contrainte pour la respecter."""
     controller = controleur([clip("clip_a.stl", (600.0, 0.0, 0.0))])
     controller.fixation_points = [(600.0, 0.0, 0.0)]
-    controller.pinned_points = {3: [900.0, 50.0, 0.0]}
+    controller.pinned_points = [[900.0, 50.0, 0.0]]
     config = {}
     controller._publish_pinned(config)
     assert config["pinned_points"] == [[600.0, 0.0, 0.0], [900.0, 50.0, 0.0]]

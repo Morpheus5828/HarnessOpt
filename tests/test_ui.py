@@ -1056,3 +1056,47 @@ class TestRegleDuBordDeTole:
 
         assert "edge_clearance" in RULE_IDS
         assert "edge_clearance" in app.pages[1].collect()["enabled_rules"]
+
+
+class TestCourbesEnGrand:
+    """Les courbes sont ce qu'on regarde pendant le calcul."""
+
+    def test_les_courbes_sont_l_onglet_par_defaut(self, app):
+        page = app.pages[2]
+        assert page.tabs.get() == page._tab_names["charts"]
+
+    def test_le_bouton_agrandit_puis_reduit(self, app):
+        page = app.pages[2]
+        depart = page.btn_charts_full.cget("text")
+        try:
+            page._toggle_charts_full()
+            app.update()
+            assert page._charts_full is True
+            assert page.btn_charts_full.cget("text") != depart
+            assert not page.card_progress.grid_info(), "le bandeau du haut s'efface"
+        finally:
+            page._toggle_charts_full()
+            app.update()
+
+    def test_reduire_rend_la_place_aux_bandeaux(self, app):
+        page = app.pages[2]
+        page._toggle_charts_full()
+        page._toggle_charts_full()
+        app.update()
+        assert page._charts_full is False
+        assert page.card_progress.grid_info()
+
+    def test_le_bandeau_de_scan_ne_reapparait_pas_seul(self, app):
+        """Il n'était pas affiché : le réduire ne doit pas le faire surgir."""
+        page = app.pages[2]
+        page.show_fixation_scan(None)
+        page._toggle_charts_full()
+        page._toggle_charts_full()
+        app.update()
+        assert not page.scan_box.grid_info()
+
+    def test_les_libelles_sont_bilingues(self):
+        from ui.i18n import EN, FR
+
+        for cle in ("routing.charts.expand", "routing.charts.shrink"):
+            assert FR[cle].strip() and EN[cle].strip()

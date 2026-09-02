@@ -349,16 +349,31 @@ replacent à chaque itération, puis le retirent de ceux qu'ils peuvent bouger.
 L'agent optimise donc autour de la décision de l'intégrateur au lieu de la
 défaire au tour suivant.
 
-Rien de neuf sous le capot : c'est la mécanique des encoches de peigne, ouverte
-à l'utilisateur. Un point posé à la main et une entrée de peigne sont la même
-contrainte, et suivent le même chemin — `snap_mandatory_points`, puis le gel de
-l'indice.
+**Un point posé n'est pas une cote, c'est une zone.** La première version
+épinglait le point exactement où l'utilisateur l'avait lâché, puis le gelait.
+Deux conséquences, toutes deux mauvaises : le sommet ainsi figé ne pouvait plus
+être lissé, et le tracé se pliait autour au lieu de s'améliorer — on défaisait
+le travail des agents en croyant le guider.
+
+Le point du câble le plus proche est donc ramené à trois centimètres de
+l'ancre, pas dessus, et il n'est **pas gelé** : les agents continuent de le
+déplacer sans jamais pouvoir s'éloigner davantage. L'ancre passe dans la même
+boucle que les contraintes dures, et avant elles : une indication ne doit jamais
+créer un clash, c'est la distance qui a le dernier mot.
+
+Deux autres défauts corrigés au passage. Les points posés étaient indexés par
+le **rang de la poignée**, que le rafraîchissement recalcule à chaque nouveau
+tracé : un point posé changeait donc de sens tout seul entre deux itérations.
+Et toutes les poignées étaient replacées depuis le tracé courant, si bien que
+celle qu'on venait de déplacer revenait se coller sur le câble — le geste
+s'effaçait sous les yeux de l'utilisateur. Les points posés viennent désormais
+en tête et ne bougent plus ; les reprendre les déplace au lieu d'en ajouter.
 
 Quelques décisions qui méritent d'être dites :
 
-* **au plus quatorze poignées**, échantillonnées le long du tracé. Une par
-  point serait illisible sur un faisceau de cinquante points, et surtout
-  impossible à saisir : deux poignées voisines se recouvriraient ;
+* **au plus quatorze poignées** : d'abord les points déjà posés, puis un
+  échantillon du tracé. Une par point serait illisible sur un faisceau de
+  cinquante points, et surtout impossible à saisir ;
 * **les extrémités n'en reçoivent pas.** A et B appartiennent aux équipements ;
 * **les poignées suivent le tracé** à chaque rafraîchissement, sinon elles
   désigneraient un point que le câble a quitté ;
@@ -367,9 +382,9 @@ Quelques décisions qui méritent d'être dites :
   *Libérer les points imposés* est une action à part — et elle existe : une
   contrainte qu'on ne peut plus retirer est un piège.
 
-Ce qui justifie le BETA : le point imposé est respecté, mais rien ne vérifie
-qu'il est *tenable*. Placé dans la structure, il y restera — les agents
-l'honoreront et le rapport de conformité signalera le clash. C'est un outil
+Ce qui justifie le BETA : rien ne vérifie qu'une ancre est *atteignable*. Posée
+dans la matière, elle sera simplement inatteinte — la distance à la structure
+passe avant, et le rapport de conformité dira ce qui reste. C'est un outil
 d'expert, pas un garde-fou.
 
 ---
@@ -713,6 +728,43 @@ porte sur le **rayon de cintrage**, que rien ne garantissait. Cinq cents
 itérations, et pas une n'avait produit un tracé qu'un toron réel puisse
 suivre — un rayon nul est un pli, pas un coude.
 
+### Interdire le retour en arrière
+
+Marches avec recul, chaînes non simples, repliements : le câble revenait sur
+ses pas. `R_sequence` et la pénalité de zigzag ne l'en empêchaient pas — même
+leçon que le rayon de cintrage, une pénalité rend le repli coûteux, pas
+impossible. Un repli, c'est pourtant deux brins côte à côte qu'aucun opérateur
+ne peut router.
+
+L'avancement le long du chemin de **référence** doit donc être strictement
+croissant, et un point en retard est repoussé vers l'avant. La référence, et
+non la droite A→B : un cheminement en L recule franchement le long de A→B sans
+revenir sur ses pas, et l'interdire supprimerait des trajets parfaitement
+valides. Vérifié : un L de trente points passe la projection sans qu'un seul
+soit touché.
+
+### Ajouter des points, et en retirer
+
+Le raffinement adaptatif ne savait qu'**ajouter** des points, là où la distance
+n'était pas tenue. Rien ne les enlevait ensuite : une fois le passage trouvé,
+le tracé restait aussi dense qu'au plus fort de la difficulté — et cette
+densité empêche de tendre la courbe, puisque plus il y a de sommets sur un arc,
+plus il en faut aligner pour le redresser.
+
+`prune_redundant_points` fait le mouvement inverse. Un point est retiré si le
+segment qui le remplace **reste conforme** : distance à la structure tenue sur
+toute sa longueur — pas seulement aux extrémités, c'est là qu'un raccourci
+traverse la matière — et rayon de cintrage tenu chez les deux voisins. Un point
+qui sert à contourner quelque chose n'est donc jamais candidat ; un point
+imposé non plus.
+
+L'élagage est espacé et borné, comme l'insertion : un tracé qui perd dix points
+d'un coup change de forme d'un seul tenant, et l'agent repart d'ailleurs.
+
+Mesuré sur un couloir entre deux cloisons, 481 itérations : 36 points au
+départ, 12 à l'arrivée, longueur 1 409 mm pour un trajet direct de 1 400, rayon
+minimal 471 mm, zéro recul du début à la fin.
+
 ### Le verrou de sortie
 
 `is_deliverable` existait déjà et ne servait qu'à colorer un badge : le
@@ -858,7 +910,7 @@ ui/
   charts.py                 courbes (récompense + grandeurs physiques)
   viewer3d.py               vue 3D incrustée (fil de rendu dédié)
   widgets/  pages/          composants et écrans
-tests/                      528 tests hors interface, 142 tests d'interface
+tests/                      537 tests hors interface, 147 tests d'interface
 ```
 
 `core/geometry_metrics.py`, `core/routing_rules.py`, `core/reward_terms.py` et

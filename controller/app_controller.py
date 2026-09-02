@@ -65,6 +65,11 @@ PASSAGE_SEGMENT_COLOR = "#1E9E5A"
 #: saisir : deux poignées voisines se recouvriraient.
 MAX_HANDLES = 14
 
+#: Rayon de la zone dans laquelle le câble doit passer quand l'utilisateur pose
+#: un point à la main. Une zone, pas une cote : c'est ce qui laisse aux agents
+#: de quoi lisser autour au lieu de plier le tracé sur un sommet figé.
+ANCHOR_TOLERANCE_MM = 30.0
+
 #: Nom réservé désignant la trajectoire retenue — la meilleure sans violation
 #: rédhibitoire — par opposition à l'état courant d'un agent.
 VALID_ROUTE = "__valid__"
@@ -111,10 +116,15 @@ class AppController:
         self._clamp_model_ok = True
         #: Résultat du dernier scan de fixations existantes.
         self.scan_result = None
+        self._scan_thread = None
+        self._scanned_folder = None
         #: Édition manuelle (BETA) : poignées posées sur le tracé.
         self.manual_editing = False
-        #: Points imposés à la main, par rang de poignée.
-        self.pinned_points: dict = {}
+        #: Points posés à la main, dans l'ordre où ils l'ont été. Une **liste**
+        #: et non un dictionnaire indexé par le rang de la poignée : ce rang
+        #: est recalculé à chaque rafraîchissement du tracé, si bien qu'un
+        #: point posé changeait de sens tout seul entre deux itérations.
+        self.pinned_points: list = []
         #: Fixations simples reconnues sur la maquette, imposées elles aussi.
         self.fixation_points: list = []
         #: Meilleure trajectoire **admissible** rencontrée depuis le lancement.
@@ -122,13 +132,6 @@ class AppController:
         self.best_valid: dict | None = None
         self._handle_indices: list = []
         self._initial_path = None
-
-        self._metric_history = {
-            "clashes": {"min": float("inf"), "max": 0, "prev": None},
-            "clearance": {"min": float("inf"), "max": 0, "prev": None},
-            "bend": {"min": float("inf"), "max": 0, "prev": None},
-            "length": {"min": float("inf"), "max": 0, "prev": None},
-        }
 
     # ==================================================================
     # Étape 1 : extraction
@@ -414,6 +417,7 @@ class AppController:
                     # hors zone et pour retenir les trajectoires. Deux notions
                     # de « zone » finiraient par diverger.
                     "zone_factor": ZONE_FACTOR,
+                    "anchor_tolerance_mm": ANCHOR_TOLERANCE_MM,
                     "edge_clearance_mm": (
                         rules.edge_clearance_mm
                         if rules.is_enabled("edge_clearance") else 0.0
@@ -446,11 +450,18 @@ class AppController:
             # fusion est enregistrée en ``.vtk``, un format que le détecteur ne
             # sait pas relire — il rendrait un maillage vide sans rien dire, et
             # ne trouverait donc jamais aucune fixation.
-            scan_result = fixation_scan.scan(
-                self.extraction_summary.get("fusion_path") or paths.FUSED_MESH_PATH,
-                rule_values.get("clamps_folder", ""),
-                mesh=mesh,
-            )
+            # Le scan a peut-être déjà eu lieu à l'ouverture de la vue 3D. Le
+            # refaire coûte plusieurs secondes d'ICP pour le même résultat ; on
+            # ne recommence que si le dossier de fixations a changé depuis.
+            folder = rule_values.get("clamps_folder", "")
+            if self.scan_result is not None and folder == self._scanned_folder:
+                scan_result = self.scan_result
+            else:
+                scan_result = fixation_scan.scan(
+                    self.extraction_summary.get("fusion_path") or paths.FUSED_MESH_PATH,
+                    folder, mesh=mesh,
+                )
+                self._scanned_folder = folder
             self.scan_result = scan_result
             self._post(self.view.pages[2].show_fixation_scan, scan_result)
             self._post(self._draw_fixations, scan_result)
@@ -492,15 +503,9 @@ class AppController:
             # peigne : l'agent retient à chaque tour celle dont il est le plus
             # proche, donc c'est bien lui qui choisit — le calcul de départ ne
             # fait que proposer un point d'entrée pour bâtir le premier tracé.
-            """config["mandatory_combs"] = [
+            config["mandatory_combs"] = [
                 [[list(passage.p_in), list(passage.p_out)] for passage in comb]
                 for comb in (combs if use_fixations else [])
-            ]"""
-
-            chosen_crossings = self._crossings_to_use(values) if use_fixations else []
-            config["mandatory_combs"] = [
-                [[list(c.entry), list(c.exit)]]
-                for c in chosen_crossings
             ]
 
             # Fixations sans encoche : un point, pas une traversée. Même
@@ -568,20 +573,6 @@ class AppController:
             self.is_scanning = False
 
             with self.data_lock:
-                # Vérification de sécurité si le calcul a été annulé en cours de préparation
-                if self.shared_state is None:
-                    self.is_scanning = False
-                    self._post(self.view.pages[2].set_running_state, "idle")
-                    return
-
-                self.supervisor = TeamSupervisor(
-                    self.orchestrator, self.shared_state, self.data_lock,
-                    period_s=1.0, lang=self.view.t.lang,
-                )
-                self.supervisor.start()
-
-                self.threads_started = True
-                self.is_scanning = False
                 self.shared_state["is_playing"] = True
 
             self._post(self._setup_charts)
@@ -680,22 +671,13 @@ class AppController:
         forced_straight = set()
         for anchor in anchors:
             if isinstance(anchor, Crossing):
-                entry = np.asarray(anchor.entry, dtype=np.float64)
-                exit_p = np.asarray(anchor.exit, dtype=np.float64)
-
-                # Vecteur direction de traversée (p_in -> p_out)
-                vec_dir = exit_p - entry
-                norm_dir = np.linalg.norm(vec_dir)
-                dir_unit = vec_dir / norm_dir if norm_dir > 1e-6 else np.array([0, 0, -1])
-
-                # Prolongement garanti de 40 mm dans l'axe de la fixation
-                extended_exit = exit_p + dir_unit * 40.0
-
-                nodes.append(entry)
-                forced_straight.add(len(nodes) - 1)  # Entrée -> Sortie
-                nodes.append(exit_p)
-                forced_straight.add(len(nodes) - 1)  # Sortie -> Prolongement droit (40 mm)
-                nodes.append(extended_exit)
+                nodes.append(np.asarray(anchor.entry, dtype=np.float64))
+                forced_straight.add(len(nodes) - 1)  # tronçon entrée -> sortie
+                nodes.append(np.asarray(anchor.exit, dtype=np.float64))
+            else:
+                # Une fixation simple impose un point, pas une traversée : le
+                # tracé doit y passer, il n'a rien à y franchir.
+                nodes.append(np.asarray(anchor, dtype=np.float64))
         nodes.append(b)
         return nodes, forced_straight
 
@@ -1010,6 +992,50 @@ class AppController:
         self.viewer.reset_camera()
         self.viewer.render()
 
+        # Les fixations dès la première ouverture, sans attendre le
+        # cheminement : le scan n'avait lieu qu'au lancement, si bien qu'ouvrir
+        # la vue 3D avant montrait une maquette nue. Ce sont pourtant elles
+        # qu'on veut voir pour décider où passer.
+        self._scan_fixations_async()
+
+    def _scan_fixations_async(self):
+        """Scanne les fixations en tâche de fond et les dessine.
+
+        En tâche de fond parce que le recalage ICP prend plusieurs secondes sur
+        un dossier fourni : le faire ici figerait l'interface, ce qui est
+        exactement le défaut qu'on a passé du temps à supprimer.
+        """
+        if self.scan_result is not None or self._scan_thread is not None:
+            return
+        mesh = self.mesh
+        folder = ""
+        try:
+            folder = self.view.pages[1].collect().get("clamps_folder", "")
+        except Exception:
+            pass
+        if mesh is None or not folder:
+            return
+
+        def run():
+            try:
+                result = fixation_scan.scan(
+                    self.extraction_summary.get("fusion_path") or paths.FUSED_MESH_PATH,
+                    folder, mesh=mesh,
+                )
+            except Exception:
+                result = None
+            finally:
+                self._scan_thread = None
+            if result is not None:
+                self.scan_result = result
+                self._scanned_folder = folder
+                self._post(self.view.pages[2].show_fixation_scan, result)
+                self._post(self._draw_fixations, result)
+
+        self._scan_thread = threading.Thread(target=run, daemon=True,
+                                             name="scan-fixations")
+        self._scan_thread.start()
+
     def _open_viewer_window(self):
         """Ouvre la fenêtre 3D si elle ne l'est pas déjà."""
         if self.viewer is None or not self.viewer.is_available:
@@ -1217,25 +1243,34 @@ class AppController:
         self.view.set_status(self.t("routing.view.edit.on"), "ok")
 
     def _refresh_handles(self) -> bool:
-        """Repose les poignées sur le tracé courant. Faux s'il n'y en a pas.
+        """Repose les poignées : d'abord les points posés, puis le tracé.
 
-        Une poignée par point serait illisible sur un faisceau de cinquante
-        points, et surtout impossible à saisir : on les échantillonne.
+        L'ordre n'est pas cosmétique. Les poignées étaient toutes recalculées
+        depuis le tracé courant, si bien que celle qu'on venait de déplacer
+        revenait se coller sur le câble au rafraîchissement suivant — le geste
+        de l'utilisateur s'effaçait sous ses yeux. Les points posés viennent
+        donc en tête et **ne bougent plus** ; le reste échantillonne le tracé,
+        parce qu'une poignée par point serait illisible sur un faisceau de
+        cinquante points, et surtout impossible à saisir.
         """
         if self.viewer is None or not self.manual_editing:
             return False
         points = self._current_path()
         if points is None or len(points) < 3:
             self.viewer.clear_handles()
-            return False
+            return bool(self.pinned_points)
 
         import numpy as np
 
-        interior = np.asarray(points[1:-1], dtype=float)
-        step = max(1, int(np.ceil(len(interior) / MAX_HANDLES)))
-        self._handle_indices = list(range(1, len(points) - 1, step))
+        libre = max(0, MAX_HANDLES - len(self.pinned_points))
+        interior = list(range(1, len(points) - 1))
+        step = max(1, int(np.ceil(len(interior) / libre))) if libre else len(interior) + 1
+        self._handle_indices = interior[::step][:libre]
+
         radius = max(8.0, self.rules.harness.radius_mm * 1.4 if self.rules else 20.0)
-        self.viewer.set_handles([list(points[i]) for i in self._handle_indices], radius)
+        poignees = [list(p) for p in self.pinned_points]
+        poignees += [list(points[i]) for i in self._handle_indices]
+        self.viewer.set_handles(poignees, radius)
         return True
 
     def _current_path(self):
@@ -1244,111 +1279,42 @@ class AppController:
         if self.shared_state is not None:
             with self.data_lock:
                 algos = dict(self.shared_state.get("algos") or {})
-                team = dict(self.shared_state.get("team") or {})
-
-            # 1. On utilise le classement officiel de l'équipe s'il existe
-            ranking = team.get("ranking") or list(algos)
-
-            # 2. Sinon, on trie les agents selon leur score dans 'algos'
-            if not team.get("ranking"):
-                ranking.sort(
-                    key=lambda n: algos.get(n, {}).get("score", float("inf"))
-                    if algos.get(n, {}).get("score") is not None
-                    else float("inf")
-                )
-
+            ranking = [name for name in algos]
+            if self._best_scores:
+                ranking.sort(key=lambda n: self._best_scores.get(n, float("inf")))
             for name in ranking:
                 points = algos.get(name, {}).get("waypoints")
                 if points is not None and len(points) > 2:
                     best = points
                     break
-
         if best is None:
             best = self._initial_path
         return best
 
     def _on_handle_moved(self, index: int, point):
-        """Met à jour une poignée et reconstruit la trajectoire fluide (Ligne Jaune)."""
+        """Une poignée vient d'être déplacée : le câble devra passer par là.
+
+        Ce n'est **pas** un sommet imposé. Le point posé définit une zone de
+        passage de quelques centimètres, et le câble doit y entrer sans y être
+        cloué : les agents continuent de déplacer le point à l'intérieur, et
+        de lisser autour. Un sommet figé, lui, ne peut plus être lissé — le
+        tracé se plie autour au lieu de s'améliorer, et l'utilisateur défait
+        le travail des agents en croyant le guider.
+
+        Les premières poignées sont les points déjà posés : les déplacer les
+        déplace, elles ne s'ajoutent pas.
+        """
         if not self.manual_editing:
             return
-
-        idx_int = int(index)
-        self.pinned_points[idx_int] = [float(c) for c in point]
+        position = [float(c) for c in point]
+        rank = int(index)
+        if 0 <= rank < len(self.pinned_points):
+            self.pinned_points[rank] = position
+        else:
+            self.pinned_points.append(position)
         self._publish_pinned()
-
-        # Reconstruire le câble sous forme de ligne fluide A -> P1 -> P2 ... -> PN -> B
-        self._smooth_repath_from_handles()
+        self._refresh_handles()
         self.view.set_status(self.t("routing.view.edit.pinned"), "ok")
-
-    def _smooth_repath_from_handles(self):
-        """Reconstruit une trajectoire tendue MAIS adoucie aux ancres pour respecter le cintrage."""
-        if self.shared_state is None or self.point_a is None or self.point_b is None:
-            return
-
-        # 1. Points de contrôle : A -> Poignées violettes -> B
-        ctrl_points = [np.asarray(self.point_a, dtype=np.float32)]
-        for idx in sorted(self.pinned_points.keys()):
-            ctrl_points.append(np.asarray(self.pinned_points[idx], dtype=np.float32))
-        ctrl_points.append(np.asarray(self.point_b, dtype=np.float32))
-        ctrl_points = np.array(ctrl_points, dtype=np.float32)
-
-        if len(ctrl_points) < 2:
-            return
-
-        n_total_points = self.shared_state["config"].get("initial_points", 60)
-
-        # 2. Construction d'un tracé adouci aux coins (Congé Bézier aux sommets)
-        dense_pts = []
-        radius_corner_mm = self.rules.harness.min_bend_radius_mm if self.rules else 150.0
-
-        for i in range(len(ctrl_points) - 1):
-            p_start = ctrl_points[i]
-            p_end = ctrl_points[i + 1]
-
-            if i == 0:
-                dense_pts.append(p_start)
-
-            # Si coin intermédiaire (sphère violette), adoucir par un arc de Bézier
-            if 0 < i < len(ctrl_points) - 1:
-                p_prev = ctrl_points[i - 1]
-                p_curr = ctrl_points[i]
-                p_next = ctrl_points[i + 1]
-
-                v1 = p_prev - p_curr
-                v2 = p_next - p_curr
-                len1, len2 = np.linalg.norm(v1), np.linalg.norm(v2)
-
-                if len1 > 1e-3 and len2 > 1e-3:
-                    u1, u2 = v1 / len1, v2 / len2
-                    # Reculer proportionnellement au rayon autorisé pour adoucir le virage
-                    cut_dist = min(radius_corner_mm * 0.4, len1 * 0.35, len2 * 0.35)
-                    pt_in = p_curr + u1 * cut_dist
-                    pt_out = p_curr + u2 * cut_dist
-
-                    # Bézier quadratique pour arrondir le sommet sans angle vif
-                    for t_val in np.linspace(0.0, 1.0, 5):
-                        pt_arc = (1 - t_val)**2 * pt_in + 2 * (1 - t_val) * t_val * p_curr + t_val**2 * pt_out
-                        dense_pts.append(pt_arc)
-            else:
-                dense_pts.append(p_end)
-
-        dense_pts = np.array(dense_pts, dtype=np.float32)
-
-        # 3. Ré-échantillonnage régulier le long de l'arc
-        segs = np.linalg.norm(np.diff(dense_pts, axis=0), axis=1)
-        total_len = np.sum(segs) or 1.0
-        cum_len = np.insert(np.cumsum(segs), 0, 0.0)
-
-        target_lens = np.linspace(0.0, total_len, n_total_points)
-        new_wps = np.zeros((n_total_points, 3), dtype=np.float32)
-        for dim in range(3):
-            new_wps[:, dim] = np.interp(target_lens, cum_len, dense_pts[:, dim])
-
-        # 4. Injecter la trajectoire adoucie dans tous les agents
-        with self.data_lock:
-            for name in self.shared_state.get("algos", {}):
-                self.shared_state["algos"][name]["waypoints"] = new_wps.copy()
-                self.shared_state["algos"][name]["prev_disp"] = None
 
     def _publish_pinned(self, config=None):
         """Transmet les points imposés aux agents, sans relancer le calcul.
@@ -1358,7 +1324,7 @@ class AppController:
         à savoir d'où vient une contrainte pour la respecter.
         """
         points = [list(p) for p in self.fixation_points]
-        points += [list(p) for p in self.pinned_points.values()]
+        points += [list(p) for p in self.pinned_points]
         if config is not None:
             config["pinned_points"] = points
         elif self.shared_state is not None:
@@ -1373,7 +1339,7 @@ class AppController:
             return
         self.viewer.remove_prefix("pinned_")
         radius = max(6.0, self.rules.harness.radius_mm if self.rules else 18.0)
-        for index, point in enumerate(self.pinned_points.values()):
+        for index, point in enumerate(self.pinned_points):
             self.viewer.show_sphere(point, f"pinned_{index}",
                                     radius=radius, color="#8E44AD")
         self.viewer.render()
@@ -1435,123 +1401,35 @@ class AppController:
         self._refresh_job = self.view.after(delay, self._refresh)
 
     def _draw_paths(self, snapshot: dict):
-        """Affiche UNIQUEMENT le meilleur agent (Leader) pour supprimer le sac de nœuds."""
+        """Redessine les trajectoires qui ont bougé, et elles seules.
+
+        Reconstruire les cinq tubes à chaque rafraîchissement coûtait 20 ms par
+        appel, soit 8 % du fil principal à 4 Hz, pour redessiner le plus
+        souvent des trajectoires identiques : un agent ne bouge pas à chaque
+        cycle d'affichage.
+        """
         if self.viewer is None or not self.viewer.is_available:
             return
-
-        # 1. Nettoyer TOUS les anciens tracés des agents
-        self.viewer.remove_prefix("traj_")
-
-        # 2. Récupérer le classement officiel (Leader en index 0)
-        with self.data_lock:
-            team = dict(self.shared_state.get("team", {}) or {}) if self.shared_state else {}
-        ranking = team.get("ranking") or list(snapshot)
-
-        best_name = ranking[0] if ranking else None
-
-        # 3. Dessiner exclusivement le meilleur tracé
-        if best_name and best_name in snapshot:
-            state = snapshot[best_name]
+        changed = False
+        for name, state in snapshot.items():
             points = state.get("waypoints")
-            if points is not None and len(points) >= 2:
-                self.viewer.show_path(
-                    points, f"traj_{best_name}",
-                    color="#1E9E5A",  # Vert ou Bleu uni pour le Leader
-                    width=8,
-                )
-
-        self._refresh_handles()
-        self.viewer.render()
-
-    def _compute_metric_trends(self, kpis: dict) -> dict:
-        """Calcule Min, Max et émojis de tendance (↗️ ↘️ ➡️) pour chaque contrainte."""
-        results = {}
-
-        metrics_map = {
-            "clashes": (float(kpis.get("n_clashes", 0)), False),  # False = Baisse souhaitée
-            "clearance": (float(kpis.get("min_dist_mm", 0)), True),  # True = Hausse souhaitée
-            "bend": (float(kpis.get("min_bend_radius_mm", 0)), True),
-            "length": (float(kpis.get("length_mm", 0)), False),
-        }
-
-        for key, (val, higher_is_better) in metrics_map.items():
-            hist = self._metric_history[key]
-
-            # Mise à jour Min / Max
-            if val < hist["min"]: hist["min"] = val
-            if val > hist["max"]: hist["max"] = val
-
-            # Calcul de la tendance par rapport à l'itération précédente
-            prev = hist["prev"]
-            if prev is None or abs(val - prev) < 1e-2:
-                emoji = "➡️"
-                status_color = "neutral"
-            elif val > prev:
-                emoji = "📈 ↗️" if higher_is_better else "📉 ↗️"
-                status_color = "ok" if higher_is_better else "danger"
-            else:
-                emoji = "📉 ↘️" if not higher_is_better else "📈 ↘️"
-                status_color = "ok" if not higher_is_better else "danger"
-
-            hist["prev"] = val
-
-            # Formatage : Actuel (Min: X | Max: Y) Emoji
-            min_str = "0" if hist["min"] == float("inf") else f"{hist['min']:.1f}"
-            max_str = f"{hist['max']:.1f}"
-
-            results[key] = {
-                "display": f"{val:.1f} (min: {min_str} | max: {max_str}) {emoji}",
-                "color": status_color
-            }
-
-        return results
-
-    def _compute_metric_trends(self, kpis: dict) -> dict:
-        """Calcule Min, Max et émojis de tendance (↗️ ↘️ ➡️) pour chaque contrainte."""
-        results = {}
-
-        metrics_map = {
-            "clashes": (float(kpis.get("n_clashes", 0)), False),  # Baisse = Amélioration
-            "clearance": (float(kpis.get("min_dist_mm", 0)), True),  # Hausse = Amélioration
-            "bend": (float(kpis.get("min_bend_radius_mm", 0)), True),  # Hausse = Amélioration
-            "length": (float(kpis.get("length_mm", 0)), False),  # Baisse = Amélioration
-        }
-
-        for key, (val, higher_is_better) in metrics_map.items():
-            hist = self._metric_history.get(key)
-            if not hist:
-                hist = {"min": float("inf"), "max": 0, "prev": None}
-                self._metric_history[key] = hist
-
-            # Mise à jour Min / Max
-            if val < hist["min"]:
-                hist["min"] = val
-            if val > hist["max"]:
-                hist["max"] = val
-
-            # Calcul de la tendance
-            prev = hist["prev"]
-            if prev is None or abs(val - prev) < 1e-2:
-                emoji = "➡️"
-                status_color = "neutral"
-            elif val > prev:
-                emoji = "📈 ↗️" if higher_is_better else "📉 ↗️"
-                status_color = "ok" if higher_is_better else "danger"
-            else:
-                emoji = "📉 ↘️" if not higher_is_better else "📈 ↘️"
-                status_color = "ok" if not higher_is_better else "danger"
-
-            hist["prev"] = val
-
-            min_str = "0.0" if hist["min"] == float("inf") else f"{hist['min']:.1f}"
-            max_str = f"{hist['max']:.1f}"
-
-            results[key] = {
-                "display": f"{val:.1f} (min: {min_str} | max: {max_str}) {emoji}",
-                "color": status_color,
-            }
-
-        return results
+            if points is None:
+                continue
+            signature = (state.get("iteration"), len(points))
+            if self._path_signatures.get(name) == signature:
+                continue
+            self._path_signatures[name] = signature
+            entry = self.benchmark_algos.get(name, {})
+            self.viewer.show_path(
+                points, f"traj_{name}",
+                color=entry.get("color", "#2D7FF9"), width=7,
+            )
+            changed = True
+        if changed:
+            # Les poignées suivent le tracé : laissées où elles étaient, elles
+            # désigneraient un point que le câble a quitté.
+            self._refresh_handles()
+            self.viewer.render()
 
     def _update_page(self, snapshot: dict, team: dict):
         # Avant tout affichage : ce qui sera rendu à l'utilisateur n'est pas le
@@ -1606,14 +1484,9 @@ class AppController:
                 }
             )
 
-        trends = {}
-        if best_state.get("report") is not None:
-            trends = self._compute_metric_trends(best_state["report"].kpis)
-
         self.view.pages[2].update_live(
             {
                 "report": best_state.get("report"),
-                "trends": trends,
                 "valid": self._valid_summary(),
                 "has_valid": self.best_valid is not None,
                 "iteration": best_state.get("iteration"),

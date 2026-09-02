@@ -288,7 +288,7 @@ class RoutingPage(ctk.CTkFrame):
         right.grid_columnconfigure(0, weight=1)
 
         # --- avancement ---------------------------------------------------
-        progress_card = Card(right)
+        progress_card = self.card_progress = Card(right)
         progress_card.grid(row=0, column=0, sticky="ew", pady=(0, SPACE.SM))
 
         phase_row = ctk.CTkFrame(progress_card.body, fg_color="transparent")
@@ -392,11 +392,23 @@ class RoutingPage(ctk.CTkFrame):
         )
         self.btn_release.pack(side="right", padx=(0, SPACE.MD))
 
+        # Les courbes sont la seule sortie qu'on lit en continu pendant un
+        # calcul, et la seule qui gagne vraiment à être grande. Ce bouton leur
+        # donne toute la colonne : les bandeaux du dessus s'effacent, la vue
+        # 3D vivant de toute façon dans sa propre fenêtre.
+        self.btn_charts_full = ctk.CTkButton(
+            view_bar, text=t("routing.charts.expand"), width=170, height=26,
+            font=FONT.SMALL_BOLD, fg_color="transparent", border_width=1,
+            border_color=theme.BORDER, text_color=theme.TEXT,
+            hover_color=theme.SURFACE_ALT, command=self._toggle_charts_full,
+        )
+        self.btn_charts_full.pack(side="right", padx=(0, SPACE.MD))
+
         # --- état de la vue 3D --------------------------------------------------
         # La petite vue incrustée est supprimée : elle coûtait une capture
         # d'écran par image pour montrer une scène figée, et se disputait le
         # pilote graphique avec la vraie fenêtre. Il ne reste ici qu'un état.
-        view_frame = ctk.CTkFrame(
+        view_frame = self.view_state = ctk.CTkFrame(
             right, fg_color=theme.SURFACE, border_width=1,
             border_color=theme.BORDER, corner_radius=SPACE.RADIUS,
         )
@@ -462,6 +474,12 @@ class RoutingPage(ctk.CTkFrame):
             self.tabs.tab(self._tab_names["charts"]), fg_color="transparent"
         )
         self.charts_container.pack(fill="both", expand=True)
+
+        # Les courbes s'affichent d'emblée : c'est ce qu'on regarde pendant que
+        # le calcul tourne. La conformité, elle, se lit à la fin.
+        self.tabs.set(self._tab_names["charts"])
+        self._charts_full = False
+        self._scan_visible = False
 
     # -- réactions -------------------------------------------------------
 
@@ -537,6 +555,20 @@ class RoutingPage(ctk.CTkFrame):
 
     def _on_release_pinned(self):
         self.app.controller.clear_pinned_points()
+
+    def _toggle_charts_full(self):
+        """Donne toute la colonne droite aux courbes, ou la rend aux bandeaux."""
+        self._charts_full = not self._charts_full
+        for widget in (self.card_progress, self.scan_box, self.view_state):
+            if self._charts_full:
+                widget.grid_remove()
+            elif widget is not self.scan_box or self._scan_visible:
+                widget.grid()
+        self.btn_charts_full.configure(
+            text=self.t("routing.charts.shrink") if self._charts_full
+            else self.t("routing.charts.expand")
+        )
+        self.tabs.set(self._tab_names["charts"])
 
     def _toggle_advanced(self):
         self._advanced_open = not self._advanced_open
@@ -671,11 +703,14 @@ class RoutingPage(ctk.CTkFrame):
             widget.destroy()
 
         if result is None:
+            self._scan_visible = False
             self.scan_box.grid_remove()
             return
 
         lang = self.app.t.lang
-        self.scan_box.grid(row=1, column=0, sticky="ew", pady=(0, SPACE.SM))
+        self._scan_visible = True
+        if not self._charts_full:
+            self.scan_box.grid(row=1, column=0, sticky="ew", pady=(0, SPACE.SM))
 
         if not result.ran:
             self.lbl_scan.configure(
