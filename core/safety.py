@@ -11,7 +11,7 @@ Le geste correctif retenu ici est la **projection**, pas le rejet. Rejeter une
 trajectoire fait perdre l'itération et renvoie l'agent d'où il vient ;
 projeter la ramène dans le domaine admissible, et l'agent continue d'optimiser
 depuis un point valide. C'est le geste qui marche déjà ailleurs dans ce code :
-``snap_passages`` replace le câble dans les encoches, ``offset_from_surface``
+``snap_comb_passages`` replace le câble dans les encoches, ``offset_from_surface``
 le décolle de la surface. On le généralise.
 
 Deux principes gouvernent tout le module :

@@ -6,6 +6,10 @@ from core.agent.config import _CRABE_GEOMETRY_CACHE
 
 SENSOR_COUNT_DEFAULT = 14
 
+#: Gain minimal, en mm, pour qu'une traversée de peigne glisse d'un point
+#: du câble à son voisin. En deçà, c'est du bruit de calcul.
+PASSAGE_SLIDE_HYSTERESIS_MM = 1.0
+
 
 def get_rotation_matrix_from_vectors(vec1, vec2):
     a = vec1 / np.linalg.norm(vec1)
@@ -565,53 +569,95 @@ def snap_mandatory_points(waypoints, targets, used=None):
     return locked
 
 
-def snap_passages(waypoints, couples, used=None):
-    """Épingle chaque traversée d'encoche sur deux points consécutifs du câble.
+def snap_comb_passages(waypoints, combs, used=None):
+    """Épingle une encoche par peigne — celle que le câble a lui-même choisie.
 
-    Un couple entrée/sortie n'est pas deux contraintes indépendantes : c'est
-    **une** traversée. Les épingler séparément — chacun sur le point du câble
-    qui s'en approche le plus — laisse le câble entrer dans une encoche et
-    ressortir par une autre, ou traverser à l'envers, ce qu'aucun peigne ne
-    permet. Sur un peigne à treize encoches côte à côte, c'est même le cas
-    général : les points candidats sont tous à quelques centimètres.
+    L'encoche était figée au lancement par un calcul géométrique, puis imposée
+    à l'agent pour toute la session. Deux défauts : le calcul décide avant
+    d'avoir vu où le tracé veut passer, et l'agent ne peut plus en changer même
+    lorsqu'une voisine lui conviendrait mieux.
 
-    On impose donc deux choses. Les deux points d'un couple vont sur deux
-    points **consécutifs** du câble — la traversée est un segment droit, et
-    rien ne peut s'intercaler dedans. Et les couples se succèdent dans l'ordre
-    du trajet : le second commence après la sortie du premier.
+    Ici le choix est **continu**. À chaque itération, on retient pour chaque
+    peigne l'encoche la plus proche du tracé courant, et c'est celle-là qu'on
+    épingle. L'agent choisit donc en déplaçant le câble : s'il dérive vers
+    l'encoche d'à côté, c'est elle qui devient le passage. La garantie ne
+    change pas — le câble traverse toujours **une** encoche de chaque peigne,
+    par un couple entier — seule la décision revient à qui de droit.
 
     Args:
         waypoints: trajectoire ``(n, 3)``, modifiée sur place.
-        couples: traversées ``(k, 2, 3)``, dans l'ordre du trajet, ou ``None``.
+        combs: un peigne par entrée, chacun donnant ses couples candidats sous
+            la forme ``(k, 2, 3)``. Les peignes sont pris dans l'ordre du
+            trajet.
         used: indices déjà réservés, à ne pas réattribuer.
 
     Returns:
         L'ensemble des indices verrouillés.
     """
-    if couples is None or len(couples) == 0 or len(waypoints) < 4:
+    if combs is None or len(combs) == 0 or len(waypoints) < 5:
         return set()
 
     locked = set(used or ())
     n = len(waypoints)
-    # Les extrémités appartiennent aux équipements : elles ne se négocient pas.
-    floor = 1
-    for entry, exit_point in np.asarray(couples, dtype=np.float32):
-        best, best_cost = None, np.inf
-        for index in range(floor, n - 2):
-            if index in locked or (index + 1) in locked:
+    # On démarre à 2 : la traversée occupe deux points et son coût se juge sur
+    # ceux d'avant et d'après, qui doivent exister et ne pas être une extrémité.
+    floor = 2
+    for comb in combs:
+        candidates = np.asarray(comb, dtype=np.float32).reshape(-1, 2, 3)
+        if not len(candidates):
+            continue
+
+        # Deux décisions, prises séparément — c'est ce qui rend l'ensemble
+        # stable *et* réversible.
+        #
+        # 1. **Où**, le long du câble : le point le plus proche du centre du
+        #    peigne. Ce centre ne bouge pas, donc l'emplacement ne saute pas
+        #    d'un tour à l'autre.
+        centre = candidates.reshape(-1, 3).mean(axis=0)
+        index, best_distance = None, np.inf
+        for position in range(floor, n - 2):
+            if position in locked or (position + 1) in locked:
                 continue
-            cost = (float(np.linalg.norm(waypoints[index] - entry))
-                    + float(np.linalg.norm(waypoints[index + 1] - exit_point)))
-            if cost < best_cost:
-                best, best_cost = index, cost
+            distance = float(np.linalg.norm(waypoints[position] - centre))
+            # Une hystérésis, et elle sert : une fois la traversée épinglée,
+            # ses deux points encadrent le centre du peigne et se retrouvent à
+            # égale distance de lui. Sans marge, le bruit de calcul suffirait à
+            # la faire glisser d'un point à son voisin à chaque itération.
+            if distance < best_distance - PASSAGE_SLIDE_HYSTERESIS_MM:
+                best_distance, index = distance, position
+
+        best = None
+        if index is not None:
+            # 2. **Laquelle**, parmi les encoches du peigne. Jugée contre les
+            #    points **libres** qui encadrent la traversée, jamais contre
+            #    ceux qu'on s'apprête à épingler : mesuré sur ces derniers, le
+            #    choix se figerait au premier tour — l'épinglage place le câble
+            #    exactement sur l'encoche, qui resterait éternellement la plus
+            #    proche d'elle-même. Mesurée sur les voisins, l'encoche retenue
+            #    suit le tracé que l'agent construit autour d'elle.
+            avant, apres = waypoints[index - 1], waypoints[index + 2]
+            costs = (np.linalg.norm(candidates[:, 0] - avant, axis=1)
+                     + np.linalg.norm(candidates[:, 1] - apres, axis=1))
+            # Le couple est réversible : entrer par la sortie est permis, il
+            # n'y a rien à retourner dans une encoche.
+            costs_flip = (np.linalg.norm(candidates[:, 1] - avant, axis=1)
+                          + np.linalg.norm(candidates[:, 0] - apres, axis=1))
+            flipped = costs_flip < costs
+            which = int(np.argmin(np.minimum(costs, costs_flip)))
+            best = (index, which, bool(flipped[which]))
+
         if best is None:
             # Plus de place : on préfère un passage non épinglé à un couple
             # disloqué, qui serait pire que pas de contrainte du tout.
             break
-        waypoints[best] = entry
-        waypoints[best + 1] = exit_point
-        locked.update((best, best + 1))
-        floor = best + 2
+        index, which, flipped = best
+        entry, exit_point = candidates[which]
+        if flipped:
+            entry, exit_point = exit_point, entry
+        waypoints[index] = entry
+        waypoints[index + 1] = exit_point
+        locked.update((index, index + 1))
+        floor = index + 2
     return locked
 
 

@@ -9,7 +9,7 @@ négocie pas à cette distance, d'où l'épinglage.
 import numpy as np
 import pytest
 
-from core.agent.tool import snap_mandatory_points, snap_passages
+from core.agent.tool import snap_comb_passages, snap_mandatory_points
 
 
 def trace(n=11):
@@ -174,109 +174,137 @@ def test_un_refus_laisse_le_trajet_a_deux_etapes():
 
 
 # ----------------------------------------------------------------------
-# Un couple ne se disloque pas
+# C'est l'agent qui choisit son encoche
 # ----------------------------------------------------------------------
 
-def couples(*pairs):
-    return np.asarray(pairs, dtype=np.float32).reshape(-1, 2, 3)
+def peigne(x=600.0, ys=(0.0, 40.0, 80.0, 120.0, 160.0), epaisseur=20.0):
+    """Un peigne : plusieurs encoches côte à côte selon y, traversées selon z."""
+    return np.array([[[x, y, 0.0], [x, y, epaisseur]] for y in ys], dtype=np.float32)
 
 
-def test_les_deux_points_d_un_couple_sont_consecutifs():
-    """La traversée est un segment : rien ne s'intercale dedans."""
-    points = trace()
-    locked = snap_passages(points, couples([[50.0, 5.0, 0.0], [50.0, -5.0, 0.0]]))
-    assert sorted(locked) == [min(locked), min(locked) + 1]
+def cable(y, n=25):
+    return np.linspace([0.0, y, 10.0], [1200.0, y, 10.0], n).astype(np.float32)
 
 
-def test_l_entree_precede_la_sortie():
-    points = trace()
-    locked = sorted(snap_passages(points, couples([[50.0, 5.0, 0.0], [55.0, -5.0, 0.0]])))
-    assert np.allclose(points[locked[0]], [50.0, 5.0, 0.0])
-    assert np.allclose(points[locked[1]], [55.0, -5.0, 0.0])
+def encoche_retenue(waypoints, locked):
+    return float(waypoints[min(locked)][1])
 
 
-def test_deux_couples_ne_s_entrelacent_pas():
-    """Le défaut visé : entrer dans une encoche et ressortir par la voisine."""
-    points = trace(n=21)
-    premier = [[30.0, 5.0, 0.0], [30.0, -5.0, 0.0]]
-    second = [[70.0, 5.0, 0.0], [70.0, -5.0, 0.0]]
-    locked = sorted(snap_passages(points, couples(premier, second)))
+def test_l_encoche_retenue_est_la_plus_proche_du_cable():
+    """L'agent choisit en déplaçant le câble, pas en obéissant à un calcul."""
+    for y, attendu in ((0.0, 0.0), (45.0, 40.0), (90.0, 80.0), (155.0, 160.0)):
+        points = cable(y)
+        locked = snap_comb_passages(points, [peigne()])
+        assert encoche_retenue(points, locked) == attendu
+
+
+def test_le_choix_suit_le_cable_d_une_iteration_a_l_autre():
+    """C'est tout l'intérêt : l'agent peut changer d'encoche en chemin."""
+    points = cable(10.0)
+    premier = encoche_retenue(points, snap_comb_passages(points, [peigne()]))
+    points = cable(150.0)
+    second = encoche_retenue(points, snap_comb_passages(points, [peigne()]))
+    assert premier != second
+
+
+def test_un_seul_couple_est_retenu_par_peigne():
+    points = cable(45.0)
+    locked = snap_comb_passages(points, [peigne()])
+    assert len(locked) == 2
+
+
+def test_le_couple_retenu_reste_entier():
+    """Entrer dans une encoche et ressortir par une autre est impossible."""
+    points = cable(85.0)
+    locked = sorted(snap_comb_passages(points, [peigne()]))
+    a, b = tuple(points[locked[0]]), tuple(points[locked[1]])
+    couples = {(tuple(c[0]), tuple(c[1])) for c in peigne()}
+    assert (a, b) in couples or (b, a) in couples
+
+
+def test_les_deux_points_restent_consecutifs():
+    points = cable(45.0)
+    locked = sorted(snap_comb_passages(points, [peigne()]))
+    assert locked[1] == locked[0] + 1
+
+
+def test_le_sens_de_traversee_suit_le_cable():
+    """p_in et p_out sont réversibles : il n'y a rien à retourner dans une encoche.
+
+    On juge sur une encoche dont l'axe suit le sens de marche : le câble doit
+    entrer par le point qu'il rencontre en premier, quel que soit celui que le
+    détecteur a nommé ``p_in``.
+    """
+    unique = np.array([[[590.0, 0.0, 0.0], [610.0, 0.0, 0.0]]], dtype=np.float32)
+
+    aller = np.linspace([0.0, 0.0, 0.0], [1200.0, 0.0, 0.0], 25).astype(np.float32)
+    locked = sorted(snap_comb_passages(aller, [unique]))
+    assert aller[locked[0]][0] < aller[locked[1]][0], "on traverse dans le sens de marche"
+
+    retour = np.linspace([1200.0, 0.0, 0.0], [0.0, 0.0, 0.0], 25).astype(np.float32)
+    locked = sorted(snap_comb_passages(retour, [unique]))
+    assert retour[locked[0]][0] > retour[locked[1]][0], "et dans l'autre sens à rebours"
+
+
+def test_deux_peignes_donnent_deux_traversees():
+    points = np.linspace([0.0, 45.0, 10.0], [2000.0, 45.0, 10.0], 40).astype(np.float32)
+    locked = snap_comb_passages(points, [peigne(x=600.0), peigne(x=1400.0)])
     assert len(locked) == 4
-    assert locked[1] + 1 <= locked[2], "le second couple commence après le premier"
 
 
-def test_les_couples_restent_dans_l_ordre_du_trajet():
-    points = trace(n=21)
-    a = [[25.0, 0.0, 0.0], [27.0, 0.0, 0.0]]
-    b = [[75.0, 0.0, 0.0], [77.0, 0.0, 0.0]]
-    locked = sorted(snap_passages(points, couples(a, b)))
+def test_les_peignes_restent_dans_l_ordre_du_trajet():
+    points = np.linspace([0.0, 45.0, 10.0], [2000.0, 45.0, 10.0], 40).astype(np.float32)
+    locked = sorted(snap_comb_passages(points, [peigne(x=600.0), peigne(x=1400.0)]))
     assert points[locked[0]][0] < points[locked[2]][0]
 
 
-def test_deux_encoches_voisines_ne_partagent_aucun_point():
-    """Sur un peigne, les candidats sont tous à quelques centimètres."""
-    points = trace(n=21)
-    a = [[50.0, 3.0, 0.0], [50.0, -3.0, 0.0]]
-    b = [[52.0, 3.0, 0.0], [52.0, -3.0, 0.0]]
-    locked = snap_passages(points, couples(a, b))
-    assert len(locked) == 4
-
-
 def test_les_extremites_restent_intouchees():
-    points = trace()
+    points = cable(45.0)
     depart, arrivee = points[0].copy(), points[-1].copy()
-    snap_passages(points, couples([[0.5, 0.0, 0.0], [1.0, 0.0, 0.0]],
-                                  [[98.0, 0.0, 0.0], [99.5, 0.0, 0.0]]))
-    assert np.allclose(points[0], depart)
-    assert np.allclose(points[-1], arrivee)
-
-
-def test_un_couple_est_atteint_exactement():
-    points = trace()
-    entree, sortie = [52.0, 7.0, 0.0], [54.0, -7.0, 0.0]
-    snap_passages(points, couples([entree, sortie]))
-    for cible in (entree, sortie):
-        assert np.linalg.norm(points - np.array(cible), axis=1).min() < 1e-4
-
-
-def test_l_epinglage_par_couples_est_idempotent():
-    """Rappelé à chaque itération, il ne doit pas dériver."""
-    points = trace(n=21)
-    jeu = couples([[30.0, 5.0, 0.0], [30.0, -5.0, 0.0]],
-                  [[70.0, 5.0, 0.0], [70.0, -5.0, 0.0]])
-    premier = snap_passages(points, jeu)
-    apres = points.copy()
-    assert snap_passages(points, jeu) == premier
-    assert np.allclose(points, apres)
+    snap_comb_passages(points, [peigne()])
+    assert np.allclose(points[0], depart) and np.allclose(points[-1], arrivee)
 
 
 def test_les_indices_reserves_sont_evites():
-    points = trace(n=21)
-    locked = snap_passages(points, couples([[50.0, 5.0, 0.0], [50.0, -5.0, 0.0]]),
-                           used={10, 11})
-    assert not ({10, 11} & (locked - {10, 11})) and len(locked) == 4
-    assert np.allclose(points[10], [50.0, 0.0, 0.0]), "un point réservé n'a pas bougé"
+    points = cable(45.0, n=25)
+    locked = snap_comb_passages(points, [peigne()], used={12, 13})
+    assert {12, 13} <= locked and len(locked) == 4
 
 
-def test_plus_de_couples_que_de_place_ne_disloque_rien():
-    """Mieux vaut un passage non épinglé qu'un couple coupé en deux."""
-    points = trace(n=6)
-    jeu = couples(*[[[float(i), 1.0, 0.0], [float(i) + 1, -1.0, 0.0]]
-                    for i in range(4)])
-    locked = snap_passages(points, jeu)
-    assert len(locked) % 2 == 0
-    assert 0 not in locked and (len(points) - 1) not in locked
+def test_l_epinglage_par_peigne_est_idempotent():
+    """Rappelé à chaque itération, il ne doit pas dériver."""
+    points = cable(45.0)
+    premier = snap_comb_passages(points, [peigne()])
+    apres = points.copy()
+    assert snap_comb_passages(points, [peigne()]) == premier
+    assert np.allclose(points, apres)
 
 
-def test_aucun_couple_ne_verrouille_rien():
-    points = trace()
+def test_aucun_peigne_ne_verrouille_rien():
+    points = cable(45.0)
     avant = points.copy()
-    assert snap_passages(points, None) == set()
-    assert snap_passages(points, np.zeros((0, 2, 3))) == set()
+    assert snap_comb_passages(points, None) == set()
+    assert snap_comb_passages(points, []) == set()
     assert np.allclose(points, avant)
+
+
+def test_un_peigne_vide_est_ignore():
+    points = cable(45.0)
+    assert len(snap_comb_passages(points, [np.zeros((0, 2, 3)), peigne()])) == 2
 
 
 def test_un_trace_trop_court_ne_leve_pas():
     for n in (0, 1, 2, 3):
         points = np.zeros((n, 3), dtype=np.float32)
-        assert snap_passages(points, couples([[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]])) == set()
+        assert snap_comb_passages(points, [peigne()]) == set()
+
+
+def test_l_agent_recoit_bien_toutes_les_encoches():
+    """Un peigne réduit à une encoche au lancement rendrait le choix illusoire."""
+    source = open("core/agent_worker.py", encoding="utf-8").read()
+    assert 'cfg.get("mandatory_combs")' in source
+    assert "snap_comb_passages(wp_current, mandatory_combs)" in source
+
+    controleur = open("controller/app_controller.py", encoding="utf-8").read()
+    assert 'config["mandatory_combs"]' in controleur
+    assert "for passage in comb" in controleur

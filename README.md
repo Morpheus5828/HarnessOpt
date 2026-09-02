@@ -467,53 +467,50 @@ l'ellipse de rapport 1 : ils ne sont jamais sanctionnés, quel que soit le
 facteur retenu. Une seule notion de zone sert aux deux usages — deux
 finiraient par diverger.
 
-#### Choisir soi-même l'encoche
+#### C'est l'agent qui choisit son encoche
 
-#### Toutes les fixations, pas seulement les peignes
+L'application a proposé, un temps, de choisir soi-même l'encoche de chaque
+peigne — une fenêtre au lancement, un clic sur l'encoche en 3D. C'est retiré :
+le cheminement ne s'interrompt plus pour demander quoi que ce soit.
 
-Une fixation sans encoche — un clip, un crabe déjà monté — était **purement
-ignorée**, faute d'encoche à choisir. Elle n'impose pourtant pas moins un point
-de passage qu'un peigne, et le tracé coupait donc au plus court en laissant de
-côté une ligne de fixations parfaitement utilisable.
+Le choix n'est pas revenu pour autant à un calcul fait au lancement, ce qui
+aurait été le même défaut sous un autre nom : une décision prise avant d'avoir
+vu où le tracé veut passer, puis imposée à l'agent pour toute la session.
 
-Elles deviennent des étapes du trajet, fusionnées avec les traversées de
-peigne et ordonnées le long de A→B. Un peigne apporte un couple entrée/sortie
-et un tronçon droit ; un clip apporte **un point**, sans rien à franchir. Les
-deux sont ensuite épinglés par le même mécanisme, celui qui sert déjà à
-l'édition manuelle : l'agent n'a pas à savoir d'où vient une contrainte pour
-la respecter.
+**Il est continu.** Les agents reçoivent *toutes* les encoches candidates de
+chaque peigne, et `snap_comb_passages` retient à chaque itération celle que le
+câble a lui-même désignée. L'agent choisit donc en déplaçant le câble : s'il
+dérive vers l'encoche voisine, c'est elle qui devient le passage. La garantie
+ne change pas — le câble traverse toujours **une** encoche de chaque peigne,
+par un couple entier, dans le sens de la marche — seule la décision revient à
+qui de droit.
 
-Une fois le scan terminé et les passages dessinés, l'application ouvre une
-fenêtre : **par quelle encoche le faisceau doit-il passer ?** Une liste
-déroulante par peigne, l'encoche que le calcul retiendrait déjà sélectionnée,
-et « ne pas emprunter ce peigne » en tête de liste.
+Deux décisions prises séparément, et c'est ce qui rend l'ensemble stable *et*
+réversible :
 
-Une liste déroulante plutôt qu'une case par encoche : un peigne peut en porter
-treize, et treize cases à cocher dont une seule peut être retenue est un
-formulaire qui ment sur ce qu'il autorise. La liste dit la règle par sa forme
-même — un choix, et un seul.
+* **où**, le long du câble : le point le plus proche du centre du peigne. Ce
+  centre ne bouge pas, donc la traversée ne glisse pas d'un point à son voisin
+  d'une itération à l'autre. Une hystérésis d'un millimètre l'y aide — une fois
+  épinglés, les deux points encadrent le centre et se retrouvent à égale
+  distance de lui, si bien que le bruit de calcul suffirait à les faire
+  osciller ;
+* **laquelle**, parmi les encoches : jugée contre les points **libres** qui
+  encadrent la traversée, jamais contre ceux qu'on s'apprête à épingler.
+  Mesurée sur ces derniers, elle se fige au premier tour — l'épinglage place le
+  câble exactement sur l'encoche, qui reste alors éternellement la plus proche
+  d'elle-même. C'est la version d'abord écrite, et la mesure l'a montrée :
+  cinq encoches offertes, une seule visitée sur cinq cents itérations.
 
-L'application propose, l'intégrateur tranche : c'est lui qui sait quelle
-encoche est libre, laquelle est réservée à un autre faisceau, laquelle est
-atteignable à l'outil, et rien de cela n'est dans le DMU. Chaque changement se
-répercute **aussitôt sur la vue 3D** : l'encoche désignée s'allume avant même
-de valider, plutôt que d'arbitrer sur des coordonnées. La fenêtre arrive après
-l'affichage, jamais avant.
+Mesuré sur un peigne à cinq encoches, en infléchissant le tracé de départ :
 
-**Le choix se fait aussi directement en 3D.** La vue s'ouvre d'elle-même au
-lancement du cheminement — poser la question devant une fenêtre fermée
-reviendrait à demander d'arbitrer à l'aveugle — et chaque encoche y est
-cliquable. Cliquer une encoche la retient pour son peigne ; recliquer celle
-qui l'est déjà écarte le peigne. C'est le geste minimal : un peigne n'accepte
-qu'une encoche, donc désigner, c'est choisir, et le seul autre état possible
-est « aucune ». Le clic et la liste déroulante décrivent le même choix et
-restent synchronisés — il ne doit pas en exister deux versions.
+| tracé initial | encoche empruntée | passages garantis |
+|---|---|---|
+| vers y = −75 | **y = −80** | 219 / 219 |
+| vers y = +75 | **y = +80** | 219 / 219 |
 
-Tout ignorer, fermer la fenêtre et écarter chaque peigne un à un reviennent au
-même : aucun passage imposé. La réponse se retrouve sur l'interrupteur
-*Emprunter les fixations existantes* de la page, et y reste mémorisée ; le
-réglage de la page décide en retour de ce que la fenêtre propose à l'ouverture.
-Sans peigne dans le couloir, aucune question n'est posée.
+Même code, même peigne, encoche opposée — décidée par le seul endroit où le
+câble se trouve. L'interrupteur *Emprunter les fixations existantes* de la page
+subsiste : c'est un réglage, pas une question, et il n'interrompt rien.
 
 Les billes d'entrée (verte) et de sortie (rouge) reprennent la taille de
 l'ancienne application — la moitié du rayon du toron, assez petites pour ne pas
@@ -550,12 +547,12 @@ Un peigne est situé dans le trajet par **son centre**, pas par celui d'une de
 ses encoches : sa place ne doit pas dépendre de l'encoche qu'on lui aura
 choisie, puisque ce choix vient après.
 
-L'encoche retenue est visible partout : marquée d'une flèche dans la liste du
-bandeau, seule à garder ses couleurs dans la vue 3D — les autres passent en
-gris fin plutôt que d'être effacées, car elles existent — et nommée en console
-avec son numéro et son sens de traversée. Le calcul ne fait que **proposer** :
-la fenêtre décrite plus bas laisse l'utilisateur imposer une autre encoche, ou
-écarter le peigne.
+**Toutes** les encoches sont affichées, sans distinction : bille verte à
+l'entrée, bille rouge à la sortie, trait vert entre les deux, et elles restent
+là pendant tout le cheminement. Aucune n'est retenue à l'avance — en
+privilégier une à l'écran annoncerait une décision qui n'est pas prise, et qui
+peut changer à l'itération suivante. Le tracé, lui, montre par où le câble
+passe réellement.
 
 #### Un couple ne se disloque pas
 
@@ -572,7 +569,7 @@ point sur le point du câble le plus proche laisse le câble entrer dans une
 encoche et ressortir par une autre — et sur un peigne à treize encoches
 voisines, c'est le cas général, tous les candidats étant à quelques
 centimètres. Les deux points d'un couple vont donc sur deux points
-**consécutifs** du câble, et les couples se succèdent dans l'ordre du trajet.
+**consécutifs** du câble, et les peignes se succèdent dans l'ordre du trajet.
 Faute de place, un passage reste non épinglé : un couple coupé en deux serait
 pire que pas de contrainte du tout.
 
@@ -861,7 +858,7 @@ ui/
   charts.py                 courbes (récompense + grandeurs physiques)
   viewer3d.py               vue 3D incrustée (fil de rendu dédié)
   widgets/  pages/          composants et écrans
-tests/                      542 tests hors interface, 158 tests d'interface
+tests/                      528 tests hors interface, 142 tests d'interface
 ```
 
 `core/geometry_metrics.py`, `core/routing_rules.py`, `core/reward_terms.py` et

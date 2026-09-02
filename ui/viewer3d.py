@@ -17,10 +17,8 @@ La scène est décrite par des **recettes** (géométrie + style), pas par des
 acteurs VTK. C'est ce qui permet de fermer la fenêtre, de la rouvrir, et d'y
 retrouver la scène intacte, sans jamais partager d'objet VTK entre deux fils.
 
-Deux gestes sont rendus à l'utilisateur, tous deux impossibles sur une image
-capturée : **cliquer** un repère de la scène — pour désigner l'encoche qu'il
-veut emprunter — et **déplacer** une poignée pour imposer un point de passage
-au tracé.
+Un geste est rendu à l'utilisateur, impossible sur une image capturée :
+**déplacer** une poignée pour imposer un point de passage au tracé.
 """
 
 from __future__ import annotations
@@ -38,8 +36,6 @@ __all__ = [
     "MODE_CLOSED",
     "MODE_UNAVAILABLE",
     "MODE_STARTING",
-    "nearest_target",
-    "DEFAULT_PICK_TOLERANCE_MM",
 ]
 
 #: Fenêtre VTK ouverte.
@@ -51,41 +47,8 @@ MODE_UNAVAILABLE = "unavailable"
 #: Le fil de rendu démarre encore.
 MODE_STARTING = "starting"
 
-#: Distance maximale entre un clic et un repère pour que le clic le désigne.
-#: Au-delà, l'utilisateur visait autre chose, et deviner à sa place est pire
-#: que ne rien faire.
-DEFAULT_PICK_TOLERANCE_MM = 120.0
-
 #: Taille de la fenêtre 3D.
 DEFAULT_SIZE = (1280, 860)
-
-
-# ----------------------------------------------------------------------
-# Fonction pure, testable sans écran ni VTK
-# ----------------------------------------------------------------------
-
-def nearest_target(point, targets, tolerance_mm: float = DEFAULT_PICK_TOLERANCE_MM):
-    """Repère désigné par un clic, ou ``None`` si le clic est trop loin.
-
-    ``targets`` est une liste de couples ``(clé, position)``. Un clic dans le
-    vide, ou sur la maquette loin de tout repère, ne doit **rien** désigner :
-    prendre le repère le plus proche quoi qu'il arrive ferait basculer un
-    choix à l'autre bout de la maquette sur un clic de rotation manqué.
-    """
-    import numpy as np
-
-    if point is None or not targets:
-        return None
-    origin = np.asarray(point, dtype=float)
-    if origin.shape != (3,):
-        return None
-
-    best, best_distance = None, float("inf")
-    for key, position in targets:
-        distance = float(np.linalg.norm(np.asarray(position, dtype=float) - origin))
-        if distance < best_distance:
-            best, best_distance = key, distance
-    return best if best_distance <= float(tolerance_mm) else None
 
 
 # ----------------------------------------------------------------------
@@ -101,12 +64,11 @@ class _RenderThread(threading.Thread):
     n'offrant aucune garantie de réentrance.
     """
 
-    def __init__(self, on_ready, on_window_state, on_pick, on_handle_move, size):
+    def __init__(self, on_ready, on_window_state, on_handle_move, size):
         super().__init__(daemon=True, name="viewer3d")
         self.orders: queue.Queue = queue.Queue()
         self._on_ready = on_ready
         self._on_window_state = on_window_state
-        self._on_pick = on_pick
         self._on_handle_move = on_handle_move
         self._size = size
         self._stop_event = threading.Event()
@@ -119,8 +81,6 @@ class _RenderThread(threading.Thread):
         self.actor_names: set[str] = set()
 
         self._exited = False
-        self._pick_targets: list = []
-        self._pick_tolerance = DEFAULT_PICK_TOLERANCE_MM
         self._handles: list = []
         self._handle_radius = 30.0
 
@@ -301,7 +261,6 @@ class _RenderThread(threading.Thread):
         self.plotter = plotter
         self._exited = False
         self._observe_exit()
-        self._install_picking()
         self._install_handles()
         self._on_window_state(True)
 
@@ -319,29 +278,6 @@ class _RenderThread(threading.Thread):
 
     def _mark_exited(self, *_args):
         self._exited = True
-
-    # -- désignation par clic ----------------------------------------
-
-    def _do_set_pick_targets(self, targets, tolerance):
-        self._pick_targets = list(targets or [])
-        self._pick_tolerance = float(tolerance)
-        self._install_picking()
-
-    def _install_picking(self):
-        if not self._window_alive() or not self._pick_targets:
-            return
-        try:
-            self.plotter.enable_point_picking(
-                callback=self._picked, left_clicking=True, show_message=False,
-                show_point=False,
-            )
-        except Exception:
-            pass
-
-    def _picked(self, point, *_args):
-        key = nearest_target(point, self._pick_targets, self._pick_tolerance)
-        if key is not None:
-            self._on_pick(key)
 
     # -- poignées déplaçables ----------------------------------------
 
@@ -402,7 +338,6 @@ class Viewer3D:
         self._placeholder: ctk.CTkLabel | None = None
         self._closed = False
         self._open = False
-        self._on_pick = None
         self._on_handle_move = None
 
     # -- cycle de vie ---------------------------------------------------
@@ -418,7 +353,6 @@ class Viewer3D:
         self._thread = _RenderThread(
             on_ready=self._post_ready,
             on_window_state=self._post_window_state,
-            on_pick=self._post_pick,
             on_handle_move=self._post_handle_move,
             size=DEFAULT_SIZE,
         )
@@ -602,22 +536,6 @@ class Viewer3D:
             self._t("routing.view.closed", "La vue 3D s'ouvre dans sa propre fenêtre.")
         )
         self._notify()
-
-    # -- désignation par clic --------------------------------------------
-
-    def set_pick_targets(self, targets, tolerance_mm: float = DEFAULT_PICK_TOLERANCE_MM):
-        """Repères cliquables : une liste de couples ``(clé, position)``."""
-        self._order("set_pick_targets", list(targets or []), float(tolerance_mm))
-
-    def set_on_pick(self, callback):
-        self._on_pick = callback
-
-    def _post_pick(self, key):
-        self._post(self._deliver_pick, key)
-
-    def _deliver_pick(self, key):
-        if self._on_pick is not None and not self._closed:
-            self._on_pick(key)
 
     # -- poignées déplaçables --------------------------------------------
 

@@ -394,41 +394,32 @@ def scan_peigne(n=3, x=100.0):
                        "score": 0.9, "routing_points": points}])
 
 
-def test_sans_choix_toutes_les_encoches_sont_montrees(stl_path):
-    """Avant la question à l'utilisateur, on ne préjuge de rien."""
+def test_toutes_les_encoches_sont_montrees(stl_path):
+    """Aucune n'est retenue à l'avance : l'agent choisit, et peut changer d'avis."""
+    controller = _controleur(stl_path)
+    controller._draw_fixations(scan_peigne(5))
+    actors = controller.viewer.actors
+    assert sum(1 for name in actors if name.startswith("fixation_in_")) == 5
+    assert sum(1 for name in actors if name.startswith("fixation_out_")) == 5
+
+
+def test_chaque_encoche_a_ses_billes_et_son_trait(stl_path):
     controller = _controleur(stl_path)
     controller._draw_fixations(scan_peigne(3))
     actors = controller.viewer.actors
-    assert sum(1 for name in actors if name.startswith("fixation_in_")) == 3
+    for index in range(3):
+        assert f"fixation_in_{index}" in actors, "bille verte à l'entrée"
+        assert f"fixation_out_{index}" in actors, "bille rouge à la sortie"
+        assert f"fixation_slot_{index}" in actors, "trait vert entre les deux"
 
 
-def test_seule_l_encoche_empruntee_reste_en_couleur(stl_path):
-    """Treize encoches allumées ne diraient pas par laquelle le câble passe."""
-    from core.passage_route import choose_crossings
-
-    scan = scan_peigne(3)
-    crossings = choose_crossings((0, 0, 0), (200, 0, 0), [list(scan.fixations[0].passages)])
+def test_aucune_encoche_n_est_privilegiee(stl_path):
+    """Marquer l'une d'elles annoncerait une décision qui n'est pas prise."""
     controller = _controleur(stl_path)
-    controller._draw_fixations(scan, crossings)
-
-    actors = controller.viewer.actors
-    entrees = [name for name in actors if name.startswith("fixation_in_")]
-    assert len(entrees) == 1, "une seule entrée verte : celle qui est empruntée"
-    assert len(crossings) == 1
-
-
-def test_les_encoches_laissees_restent_visibles(stl_path):
-    """Elles existent : les effacer ferait croire à un scan incomplet."""
-    from core.passage_route import choose_crossings
-
-    scan = scan_peigne(3)
-    crossings = choose_crossings((0, 0, 0), (200, 0, 0), [list(scan.fixations[0].passages)])
-    controller = _controleur(stl_path)
-    controller._draw_fixations(scan, crossings)
-
+    controller._draw_fixations(scan_peigne(4))
     creneaux = [name for name in controller.viewer.actors
                 if name.startswith("fixation_slot_")]
-    assert len(creneaux) == 3
+    assert len(creneaux) == 4
 
 
 def test_les_fixations_survivent_a_la_fin_du_cheminement(stl_path):

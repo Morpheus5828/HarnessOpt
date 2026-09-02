@@ -34,7 +34,6 @@ __all__ = [
     "choose_crossings",
     "comb_center",
     "comb_name",
-    "default_selection",
     "describe",
     "detour_ratio",
     "filter_combs",
@@ -137,26 +136,14 @@ def filter_combs(start, goal, combs, factor: float = DEFAULT_ZONE_FACTOR) -> lis
     return kept
 
 
-def default_selection(combs, crossings) -> dict:
-    """Choix proposé à l'utilisateur : l'encoche que l'application retiendrait.
-
-    Le dictionnaire va du nom du peigne à l'index de l'encoche, ou à ``None``
-    pour un peigne qu'on n'emprunte pas. C'est la forme qu'attend
-    :func:`choose_crossings`, de sorte que ce que l'utilisateur voit proposé
-    est exactement ce qu'il peut modifier.
-    """
-    retained = {c.comb: c.passage.index for c in crossings}
-    return {comb_name(comb): retained.get(comb_name(comb)) for comb in combs if list(comb)}
-
-
 def _endpoints(passage, flipped: bool):
     p_in = np.asarray(passage.p_in, dtype=np.float64)
     p_out = np.asarray(passage.p_out, dtype=np.float64)
     return (p_out, p_in) if flipped else (p_in, p_out)
 
 
-def choose_crossings(start, goal, combs, zone_factor: float = DEFAULT_ZONE_FACTOR,
-                     selection=None) -> list:
+def choose_crossings(start, goal, combs,
+                     zone_factor: float = DEFAULT_ZONE_FACTOR) -> list:
     """Une encoche par peigne, dans l'ordre et le sens les plus courts.
 
     Args:
@@ -167,33 +154,19 @@ def choose_crossings(start, goal, combs, zone_factor: float = DEFAULT_ZONE_FACTO
         zone_factor: largeur du couloir de cheminement (voir
             :data:`DEFAULT_ZONE_FACTOR`). ``0`` ou ``None`` désactive le
             filtrage et reprend tous les peignes détectés.
-        selection: choix explicite de l'utilisateur, du nom du peigne vers
-            l'index de l'encoche voulue — ou ``None`` pour un peigne à ne pas
-            emprunter. Un peigne absent du dictionnaire est laissé au calcul.
 
     Returns:
-        La liste des :class:`Crossing` retenus, dans l'ordre du trajet. Le sens
-        de traversée reste calculé même sur une encoche imposée : il n'a aucune
-        conséquence physique, et l'utilisateur n'a pas à s'en occuper.
+        La liste des :class:`Crossing` proposés, dans l'ordre du trajet.
+
+    Ce choix n'est **pas** définitif : il sert à bâtir le chemin de départ, en
+    donnant un point d'entrée plausible sur chaque peigne. En cours de calcul,
+    les agents reçoivent toutes les encoches candidates et retiennent à chaque
+    itération celle dont ils sont le plus proches.
     """
     start = np.asarray(start, dtype=np.float64)
     goal = np.asarray(goal, dtype=np.float64)
 
     groups = filter_combs(start, goal, combs, zone_factor)
-    if selection is not None:
-        wanted = dict(selection)
-        kept = []
-        for group in groups:
-            name = comb_name(group)
-            if name not in wanted:
-                kept.append(group)
-                continue
-            index = wanted[name]
-            if index is None:
-                continue          # peigne écarté par l'utilisateur
-            chosen = [p for p in group if p.index == index]
-            kept.append(chosen or group)
-        groups = kept
     if not groups:
         return []
 

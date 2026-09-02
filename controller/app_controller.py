@@ -32,7 +32,6 @@ from core.passage_route import (
     DEFAULT_ZONE_FACTOR as ZONE_FACTOR,
     Crossing,
     choose_crossings,
-    default_selection,
     describe as describe_crossings,
     filter_combs,
     in_routing_zone,
@@ -51,10 +50,6 @@ MAX_DRAWN_CLAMPS = 60
 #: délai, le lancement reprend avec le réglage déjà présent sur la page plutôt
 #: que de rester bloqué sur une fenêtre que personne ne regarde.
 ASK_TIMEOUT_S = 300
-
-#: ``None`` est un choix légitime — « n'emprunter aucune fixation ». Il faut
-#: donc une sentinelle distincte pour dire « aucun choix fourni ».
-_UNSET = object()
 
 #: Rayon des billes d'entrée et de sortie, en fraction du rayon du toron. Une
 #: bille de la taille du faisceau masquerait l'encoche qu'elle repère. C'est la
@@ -116,9 +111,6 @@ class AppController:
         self._clamp_model_ok = True
         #: Résultat du dernier scan de fixations existantes.
         self.scan_result = None
-        #: Encoche retenue par peigne, telle que l'utilisateur l'a validée.
-        #: ``None`` = aucune fixation empruntée.
-        self.fixation_selection = None
         #: Édition manuelle (BETA) : poignées posées sur le tracé.
         self.manual_editing = False
         #: Points imposés à la main, par rang de poignée.
@@ -130,8 +122,6 @@ class AppController:
         self.best_valid: dict | None = None
         self._handle_indices: list = []
         self._initial_path = None
-        #: Quoi faire d'un clic sur une encoche. Posé le temps du choix.
-        self._pick_handler = None
 
     # ==================================================================
     # Étape 1 : extraction
@@ -458,31 +448,21 @@ class AppController:
             self._post(self.view.pages[2].show_fixation_scan, scan_result)
             self._post(self._draw_fixations, scan_result)
 
-            # Le choix de l'utilisateur commande tout : s'il refuse d'emprunter
-            # les fixations, les agents ne doivent ni y être attirés ni y être
-            # retenus. Transmettre la liste « au cas où » reviendrait à lui
-            # imposer un passage qu'il vient de refuser.
-            # La question est posée à l'utilisateur, pas déduite : emprunter une
-            # fixation contraint le tracé à passer là, ce qui peut le rallonger
-            # ou l'écarter du meilleur passage. Il doit trancher en connaissance
-            # de cause, et le voir sur la vue 3D avant de répondre.
-            self.fixation_selection = self._ask_fixation_choice(scan_result, values)
-            values["use_fixations"] = self.fixation_selection is not None
-            use_fixations = bool(values["use_fixations"])
+            # L'interrupteur de la page commande tout : décoché, les agents ne
+            # sont ni attirés vers les fixations ni retenus par elles.
+            # Transmettre la liste « au cas où » reviendrait à imposer un
+            # passage que l'utilisateur vient de refuser. C'est un réglage, pas
+            # une question : le lancement ne s'interrompt plus pour demander.
+            use_fixations = bool(values.get("use_fixations", True))
 
-            # Une encoche par peigne, pas toutes : les autres encoches d'un
-            # peigne sont celles des faisceaux voisins. Le sens de traversée
-            # est choisi en même temps, p_in et p_out étant interchangeables.
+            # Une encoche par peigne — mais laquelle, c'est l'agent qui le dit,
+            # itération après itération. Le calcul ci-dessous ne sert qu'à bâtir
+            # le chemin de départ : il propose un point d'entrée plausible sur
+            # chaque peigne, pas une décision définitive.
             crossings = self._crossings_to_use(values)
+            combs = self._combs_to_use(values)
             if crossings:
-                print(describe_crossings(crossings, self._combs_to_use(values)))
-                for crossing in crossings:
-                    print(f"   • {crossing.comb} — encoche n° "
-                          f"{crossing.passage.index + 1}"
-                          f"{' (sens inversé)' if crossing.flipped else ''}")
-                self._post(self._draw_fixations, scan_result, crossings)
-                self._post(self.view.pages[2].show_fixation_scan,
-                           scan_result, crossings)
+                print(describe_crossings(crossings, combs))
 
             config["existing_crabes"] = [
                 {
@@ -498,14 +478,16 @@ class AppController:
                 for f in scan_result.fixations
             ] if use_fixations else []
 
-            # Points que le câble doit traverser, épinglés par les agents à
+            # Encoches que le câble doit traverser, épinglées par les agents à
             # chaque itération. L'attraction par récompense ne suffit pas :
-            # elle rapproche le câble de l'encoche sans garantir qu'il y passe.
-            # Aplatis par couples — entrée, sortie, entrée, sortie… — comme le
-            # détecteur rend déjà ses ``routing_points``. C'est cette parité qui
-            # dit à l'agent quels points sont solidaires.
-            config["mandatory_points"] = [
-                point for crossing in crossings for point in crossing.points
+            # mesurée sur une vraie boucle, elle laisse le câble à 220-350 mm
+            # des encoches. On transmet **toutes** les candidates de chaque
+            # peigne : l'agent retient à chaque tour celle dont il est le plus
+            # proche, donc c'est bien lui qui choisit — le calcul de départ ne
+            # fait que proposer un point d'entrée pour bâtir le premier tracé.
+            config["mandatory_combs"] = [
+                [[list(passage.p_in), list(passage.p_out)] for passage in comb]
+                for comb in (combs if use_fixations else [])
             ]
 
             # Fixations sans encoche : un point, pas une traversée. Même
@@ -720,19 +702,18 @@ class AppController:
         combs = [list(f.passages) for f in result.fixations if f.passages]
         return filter_combs(self.point_a, self.point_b, combs)
 
-    def _crossings_to_use(self, values, selection=_UNSET):
-        """Encoches retenues, une par peigne, dans le sens qui sert le trajet.
+    def _crossings_to_use(self, values):
+        """Encoches proposées pour bâtir le chemin de départ, une par peigne.
 
-        ``selection`` sert à l'aperçu : la fenêtre de choix la fait varier à
-        chaque changement pour montrer en 3D l'encoche désignée. Omise, c'est
-        le dernier choix validé qui s'applique.
+        Ce n'est **pas** la décision finale : les agents reçoivent toutes les
+        encoches candidates et retiennent la leur à chaque itération. Il faut
+        seulement un point d'entrée plausible sur chaque peigne pour construire
+        le premier tracé, et le plus court le long du trajet fait l'affaire.
         """
         combs = self._combs_to_use(values)
         if not combs:
             return []
-        if selection is _UNSET:
-            selection = self.fixation_selection
-        return choose_crossings(self.point_a, self.point_b, combs, selection=selection)
+        return choose_crossings(self.point_a, self.point_b, combs)
 
     def _passages_to_use(self, values):
         """Toutes les encoches détectées, pour l'affichage et le décompte.
@@ -974,7 +955,6 @@ class AppController:
                 on_status=self._on_viewer_status,
                 t=lambda key, default="": self.t(key) or default,
             )
-            self.viewer.set_on_pick(self._on_viewer_pick)
             self.viewer.set_on_handle_move(self._on_handle_moved)
             self.viewer.start()
 
@@ -994,133 +974,27 @@ class AppController:
         self.viewer.reset_camera()
         self.viewer.render()
 
-    def _ask_fixation_choice(self, scan_result, values):
-        """Demande par quelle encoche passer, peigne par peigne.
+    def _open_viewer_window(self):
+        """Ouvre la fenêtre 3D si elle ne l'est pas déjà."""
+        if self.viewer is None or not self.viewer.is_available:
+            return
+        if not self.viewer.is_open:
+            self.viewer.open_window()
+            self.view.pages[2].set_detached(True)
 
-        La question n'est posée que lorsqu'elle se pose : sans passage détecté
-        dans le couloir de cheminement, il n'y a rien à emprunter et
-        interrompre l'utilisateur serait gratuit.
-
-        L'application propose son propre choix — l'encoche que le calcul
-        retiendrait — et l'utilisateur le corrige peigne par peigne. C'est lui
-        qui sait laquelle est libre, laquelle est réservée à un autre faisceau,
-        laquelle est atteignable à l'outil ; rien de tout cela n'est dans le
-        DMU. Chaque changement se voit aussitôt en 3D.
-
-        Le lancement se fait dans un fil de travail, la fenêtre doit s'ouvrir
-        sur celui de Tk : on attend donc la réponse. L'attente est bornée —
-        une fenêtre restée sans réponse ne doit pas immobiliser le calcul pour
-        toujours, on retombe alors sur ce que l'application proposait.
-
-        Returns:
-            Le dictionnaire ``nom de peigne -> index d'encoche``, ou ``None``
-            si aucune fixation n'est empruntée.
-        """
-        wanted = dict(values)
-        wanted["use_fixations"] = True
-        combs = self._combs_to_use(wanted)
-        if not combs:
-            return None
-
-        # Le réglage de la page donne le choix proposé : l'utilisateur qui a
-        # décoché « emprunter les fixations » retrouve sa position, il n'a pas
-        # à la reprendre peigne par peigne.
-        if values.get("use_fixations", True):
-            proposal = default_selection(
-                combs, choose_crossings(self.point_a, self.point_b, combs)
-            )
-        else:
-            proposal = default_selection(combs, ())
-
-        working = dict(proposal)
-        picker = {"widget": None}
-
-        def preview(selection):
-            """Aperçu 3D du choix en cours, avant même de valider."""
-            working.clear()
-            working.update(selection)
-            self._draw_fixations(
-                scan_result, self._crossings_to_use(wanted, selection)
-            )
-
-        def on_click(comb, index):
-            """Clic sur une encoche dans la vue 3D : elle devient la retenue.
-
-            Recliquer celle qui l'est déjà écarte le peigne — un peigne
-            n'accepte qu'une encoche, désigner c'est donc choisir, et le seul
-            autre état possible est « aucune ».
-            """
-            if comb not in working:
-                return
-            working[comb] = None if working.get(comb) == index else index
-            widget = picker["widget"]
-            if widget is not None:
-                # La liste déroulante suit le clic : les deux voies mènent au
-                # même choix, il ne doit pas y en avoir deux versions.
-                widget.choose(comb, working[comb])
-            else:
-                preview(dict(working))
-
-        # Le clic en 3D et la liste déroulante décrivent le même choix : on
-        # branche le premier le temps de la question, et on le débranche après.
-        self._publish_pick_targets(combs)
-        self._pick_handler = on_click
-
-        def ask():
-            try:
-                return self.view.ask_fixation_choice(
-                    combs, selection=proposal,
-                    scan_message=scan_result.message(self.t.lang),
-                    on_change=preview,
-                    on_ready=lambda widget: picker.__setitem__("widget", widget),
-                )
-            except Exception:
-                return proposal
-
-        if threading.current_thread() is threading.main_thread():
-            # Déjà sur le fil de Tk : passer par ``after`` puis attendre la
-            # réponse serait un interblocage, la boucle d'évènements étant
-            # justement celle qu'on bloquerait.
-            answer = {"value": ask()}
-        else:
-            answer = {"value": proposal}
-            answered = threading.Event()
-
-            def ask_on_ui():
-                try:
-                    answer["value"] = ask()
-                finally:
-                    answered.set()
-
-            self._post(ask_on_ui)
-            answered.wait(timeout=ASK_TIMEOUT_S)
-
-        # Le clic sur une encoche ne doit plus rien changer une fois la
-        # question tranchée : la scène reste cliquable, pas la décision.
-        self._pick_handler = None
-        selection = answer["value"]
-        # La page reflète la réponse : l'utilisateur retrouve son choix au même
-        # endroit que s'il l'avait coché lui-même, et il est mémorisé.
-        self._post(self.view.pages[2].set_use_fixations, selection is not None)
-        return selection
-
-    def _draw_fixations(self, scan_result, crossings=None):
+    def _draw_fixations(self, scan_result):
         """Place les fixations reconnues dans la vue 3D.
 
-        Rien ne les dessinait : le viewer savait masquer les acteurs
-        ``clamp_``, mais aucun n'était jamais créé. L'utilisateur n'avait donc
-        aucun moyen de vérifier ce que le scan avait reconnu.
+        Chaque fixation est dessinée avec son propre modèle, recalé là où le
+        détecteur l'a trouvée : un repère symbolique ne dirait rien de son
+        encombrement, qui est précisément ce qu'on cherche à voir.
 
-        Chaque fixation est un repère à sa position ; chaque passage de peigne
-        est matérialisé par son entrée (vert), sa sortie (rouge) et le segment
-        que le câble doit emprunter (jaune) — les mêmes couleurs que dans la
-        liste affichée au-dessus de la vue.
-
-        Une fois les encoches choisies (``crossings``), seules celles qui sont
-        **réellement empruntées** gardent ces couleurs : les autres passent en
-        gris et s'amincissent. Sans cette distinction, l'utilisateur verrait
-        treize encoches allumées sur un peigne et n'aurait aucun moyen de
-        savoir par laquelle le câble passe.
+        **Toutes** les encoches détectées sont affichées, sans distinction :
+        bille verte à l'entrée, rouge à la sortie, trait vert entre les deux.
+        Aucune n'est retenue à l'avance — c'est l'agent qui choisit la sienne,
+        et il peut en changer d'une itération à l'autre. En privilégier une à
+        l'écran annoncerait une décision qui n'est pas prise ; le tracé, lui,
+        montre par où le câble passe réellement.
         """
         if self.viewer is None or not self.viewer.is_available:
             return
@@ -1131,9 +1005,6 @@ class AppController:
 
         radius = max(6.0, self.rules.harness.radius_mm if self.rules else 20.0)
         for index, fixation in enumerate(scan_result.fixations):
-            # La fixation est dessinée avec son propre modèle, recalé là où le
-            # détecteur l'a trouvée. Un repère symbolique ne dirait rien de son
-            # encombrement, qui est précisément ce qu'on cherche à voir.
             body = self._fixation_body(fixation)
             if body is not None:
                 self.viewer.show_mesh(body, f"fixation_body_{index}",
@@ -1147,62 +1018,15 @@ class AppController:
                 )
 
         marker = max(4.0, radius * PASSAGE_MARKER_FACTOR)
-        retained = {(c.comb, c.passage.index) for c in (crossings or ())}
         for index, passage in enumerate(scan_result.passages):
-            used = crossings is None or (passage.comb, passage.index) in retained
-            if used:
-                self.viewer.show_sphere(passage.p_in, f"fixation_in_{index}",
-                                        radius=marker, color="#1E9E5A")
-                self.viewer.show_sphere(passage.p_out, f"fixation_out_{index}",
-                                        radius=marker, color="#D93A45")
-                self.viewer.show_path([passage.p_in, passage.p_out],
-                                      f"fixation_slot_{index}",
-                                      color=PASSAGE_SEGMENT_COLOR, width=9)
-            else:
-                # Encoche reconnue mais laissée aux faisceaux voisins : elle
-                # reste visible, sans quoi on croirait le scan incomplet.
-                self.viewer.show_path([passage.p_in, passage.p_out],
-                                      f"fixation_slot_{index}",
-                                      color="#6C7A89", width=3)
+            self.viewer.show_sphere(passage.p_in, f"fixation_in_{index}",
+                                    radius=marker, color="#1E9E5A")
+            self.viewer.show_sphere(passage.p_out, f"fixation_out_{index}",
+                                    radius=marker, color="#D93A45")
+            self.viewer.show_path([passage.p_in, passage.p_out],
+                                  f"fixation_slot_{index}",
+                                  color=PASSAGE_SEGMENT_COLOR, width=9)
         self.viewer.render()
-
-    def _open_viewer_window(self):
-        """Ouvre la fenêtre 3D si elle ne l'est pas déjà."""
-        if self.viewer is None or not self.viewer.is_available:
-            return
-        if not self.viewer.is_open:
-            self.viewer.open_window()
-            self.view.pages[2].set_detached(True)
-
-    def _publish_pick_targets(self, combs):
-        """Rend chaque encoche cliquable dans la vue 3D.
-
-        La cible est le **centre** de l'encoche, pas ses deux extrémités : un
-        clic vise une encoche, pas une entrée ou une sortie, et le sens de
-        traversée n'est de toute façon pas à la main de l'utilisateur.
-        """
-        if self.viewer is None or not self.viewer.is_available:
-            return
-        targets = [
-            ((passage.comb, passage.index), passage.center)
-            for comb in combs for passage in comb
-        ]
-        self.viewer.set_pick_targets(targets)
-
-    def _on_viewer_pick(self, key):
-        """Un clic dans la vue 3D a désigné une encoche.
-
-        Cliquer une encoche la retient pour son peigne ; recliquer celle qui
-        est déjà retenue écarte le peigne. C'est le geste minimal : un peigne
-        n'accepte qu'une encoche, donc désigner, c'est choisir.
-        """
-        if self._pick_handler is None:
-            return
-        try:
-            comb, index = key
-        except (TypeError, ValueError):
-            return
-        self._pick_handler(str(comb), int(index))
 
     @staticmethod
     def _fixation_body(fixation):

@@ -653,7 +653,7 @@ class RoutingPage(ctk.CTkFrame):
             info.append(f"{self.t('routing.best')} : {team['best']}")
         self.lbl_run_info.configure(text="   ·   ".join(info))
 
-    def show_fixation_scan(self, result, crossings=None):
+    def show_fixation_scan(self, result):
         """Affiche le résultat du scan des fixations existantes.
 
         Les passages ``p_in`` / ``p_out`` sont listés explicitement : ce sont
@@ -661,10 +661,10 @@ class RoutingPage(ctk.CTkFrame):
         traverse pas l'encoche n'est pas posable, et l'utilisateur doit pouvoir
         vérifier que l'application a bien reconnu les bonnes.
 
-        Une fois les encoches choisies (``crossings``), la liste distingue
-        celles qui sont **empruntées** — une par peigne — de celles qui restent
-        aux faisceaux voisins. Un peigne à treize encoches produit treize
-        lignes ; sans cette marque, aucune ne dirait par où passe le câble.
+        Toutes sont listées sans distinction : aucune n'est retenue à
+        l'avance, l'agent choisit la sienne et peut en changer d'une itération
+        à l'autre. Marquer l'une d'elles annoncerait une décision qui n'est
+        pas prise.
         """
         theme = current()
         for widget in self.scan_passages.winfo_children():
@@ -686,19 +686,12 @@ class RoutingPage(ctk.CTkFrame):
         colour = theme.ok if result.n_fixations else theme.TEXT_SOFT
         self.lbl_scan.configure(text=f"🔎  {result.message(lang)}", text_color=colour)
 
-        retained = {(c.comb, c.passage.index) for c in (crossings or ())}
-
         # Numérotation continue : l'index d'un passage est propre à son peigne,
         # deux peignes à une encoche porteraient donc tous deux le n° 1.
         for number, passage in enumerate(result.passages[:MAX_LISTED_PASSAGES], start=1):
-            used = crossings is None or (passage.comb, passage.index) in retained
-            marker = "" if crossings is None else ("→ " if used else "   ")
             ctk.CTkLabel(
-                self.scan_passages,
-                text=marker + passage.format(lang, number=number),
-                font=FONT.CODE,
-                text_color=theme.TEXT_SOFT if used else theme.TEXT_FAINT,
-                anchor="w",
+                self.scan_passages, text=passage.format(lang, number=number),
+                font=FONT.CODE, text_color=theme.TEXT_SOFT, anchor="w",
             ).pack(fill="x")
 
         remaining = result.n_passages - MAX_LISTED_PASSAGES

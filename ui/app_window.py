@@ -285,40 +285,6 @@ class AppWindow(ctk.CTk):
 
     # -- barre d'état ---------------------------------------------------------
 
-    def ask_fixation_choice(self, combs, selection=None, scan_message="",
-                            on_change=None, on_ready=None):
-        """Demande par quelle encoche passer, peigne par peigne.
-
-        La question arrive une fois le scan terminé et les passages déjà
-        dessinés en 3D : l'utilisateur répond en voyant ce dont on parle,
-        plutôt que sur une liste de coordonnées. Chaque changement se répercute
-        aussitôt sur la vue, avant même de valider.
-
-        Returns:
-            Le dictionnaire ``nom de peigne -> index d'encoche`` retenu, ou
-            ``None`` si rien n'est emprunté — fermer la fenêtre, tout ignorer
-            et n'avoir plus rien à emprunter reviennent au même.
-        """
-        from ui.widgets.fixation_picker import FixationPicker
-
-        if not combs:
-            return None
-        try:
-            picker = FixationPicker(
-                self, combs, selection=selection, lang=self.t.lang,
-                on_change=on_change, scan_message=scan_message,
-            )
-            # Le contrôleur a besoin de la fenêtre elle-même : un clic sur une
-            # encoche dans la vue 3D doit déplacer la liste déroulante
-            # correspondante, sans quoi il y aurait deux versions du choix.
-            if on_ready is not None:
-                on_ready(picker)
-            return picker.ask()
-        except Exception:
-            # Sans fenêtre utilisable, on retombe sur ce que l'application
-            # proposait : un choix par défaut vaut mieux qu'un lancement avorté.
-            return dict(selection) if selection else None
-
     def set_status(self, message: str, tone: str = "neutral"):
         theme = current()
         color = {

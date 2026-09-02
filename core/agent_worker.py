@@ -196,18 +196,17 @@ def algo_worker(
             # points sont donc épinglés à chaque itération et retirés de ceux
             # que l'agent déplace. Relus ici : le jeu peut changer d'une
             # session à l'autre sans relancer le fil.
-            # Aplatis par couples — entrée, sortie, entrée, sortie… — comme le
-            # détecteur rend déjà ses ``routing_points``. On les regroupe ici :
-            # les deux points d'une traversée sont solidaires, et les épingler
-            # séparément laisserait le câble entrer dans une encoche pour
-            # ressortir par une autre.
-            raw_mandatory = np.asarray(
-                cfg.get("mandatory_points") or [], dtype=np.float32
-            ).reshape(-1, 3)
-            usable = len(raw_mandatory) - len(raw_mandatory) % 2
-            mandatory_points = (
-                raw_mandatory[:usable].reshape(-1, 2, 3) if usable else None
-            )
+            # Un peigne par entrée, chacun avec **toutes** ses encoches
+            # candidates. L'agent choisit la sienne à chaque itération, en
+            # déplaçant le câble : ce n'est plus un calcul fait au lancement
+            # qui décide pour lui. Les deux points d'une encoche restent
+            # solidaires — les épingler séparément laisserait le câble entrer
+            # quelque part pour ressortir ailleurs.
+            mandatory_combs = [
+                np.asarray(comb, dtype=np.float32).reshape(-1, 2, 3)
+                for comb in (cfg.get("mandatory_combs") or [])
+                if len(comb)
+            ]
             # Couloir de cheminement : la même ellipse que celle qui écarte
             # les peignes hors zone, appliquée cette fois à chaque point.
             # Points imposés à la main dans la vue 3D (édition BETA). Relus à
@@ -519,7 +518,7 @@ def algo_worker(
 
             # Les passages imposés sont replacés avant tout calcul : l'agent
             # travaille donc sur une trajectoire qui les respecte déjà.
-            mandatory_locked = snap_passages(wp_current, mandatory_points)
+            mandatory_locked = snap_comb_passages(wp_current, mandatory_combs)
             # Un point posé à la main est une contrainte de même nature qu'une
             # encoche : l'agent optimise autour de la décision de
             # l'utilisateur au lieu de la défaire à l'itération suivante.
@@ -1087,7 +1086,7 @@ def algo_worker(
             # recalculés, le raffinement adaptatif ayant pu en insérer.
             frozen_indices = snap_mandatory_points(
                 smoothed_waypoints, pinned_points,
-                used=snap_passages(smoothed_waypoints, mandatory_points),
+                used=snap_comb_passages(smoothed_waypoints, mandatory_combs),
             )
 
             # ==========================================================
@@ -1516,7 +1515,7 @@ def algo_worker(
             # C'est cette trajectoire-ci qui est publiée et notée.
             snap_mandatory_points(
                 smoothed_waypoints, pinned_points,
-                used=snap_passages(smoothed_waypoints, mandatory_points),
+                used=snap_comb_passages(smoothed_waypoints, mandatory_combs),
             )
 
             # ==========================================================
