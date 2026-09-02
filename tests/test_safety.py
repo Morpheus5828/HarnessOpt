@@ -248,3 +248,176 @@ def test_une_tangente_verticale_ne_degenere_pas():
     u, v = build_local_frame(np.array([[0.0, 0.0, 1.0], [0.0, 0.0, -1.0]]))
     assert np.allclose(np.linalg.norm(u, axis=1), 1.0)
     assert np.allclose(np.linalg.norm(v, axis=1), 1.0)
+
+
+# ----------------------------------------------------------------------
+# Interdire le retour en arrière
+# ----------------------------------------------------------------------
+
+from core.safety import (  # noqa: E402
+    arc_positions,
+    project_anchors,
+    project_progress,
+    prune_redundant_points,
+)
+
+
+def reference_droite():
+    return np.array([[0.0, 0.0, 0.0], [500.0, 0.0, 0.0], [1000.0, 0.0, 0.0]])
+
+
+def route_qui_recule():
+    return np.array([[0.0, 0.0, 0.0], [200.0, 10.0, 0.0], [400.0, 10.0, 0.0],
+                     [250.0, 20.0, 0.0],            # le repli
+                     [600.0, 10.0, 0.0], [800.0, 5.0, 0.0], [1000.0, 0.0, 0.0]])
+
+
+def test_l_avancement_se_mesure_le_long_de_la_reference():
+    s, _ = arc_positions([[250.0, 40.0, 0.0]], reference_droite())
+    assert s[0] == pytest.approx(250.0)
+
+
+def test_un_recul_est_detecte():
+    s, _ = arc_positions(route_qui_recule(), reference_droite())
+    assert np.count_nonzero(np.diff(s) < 0) == 1
+
+
+def test_un_recul_est_supprime():
+    """Le défaut signalé : marches avec recul, chaînes non simples."""
+    route = route_qui_recule()
+    bouges, restants = project_progress(route, reference_droite())
+    assert bouges == 1 and restants == 0
+    s, _ = arc_positions(route, reference_droite())
+    assert np.all(np.diff(s) > 0)
+
+
+def test_un_trajet_en_L_n_est_pas_cassé():
+    """Il recule franchement le long de A→B sans revenir sur ses pas.
+
+    C'est pour cela que l'avancement se mesure sur la référence et non sur la
+    droite A→B : l'interdire supprimerait des trajets parfaitement valides.
+    """
+    forme = gm.resample_by_arclength(
+        np.array([[0.0, 0.0, 0.0], [1000.0, 0.0, 0.0], [1000.0, 800.0, 0.0]]), 30
+    )
+    avant = forme.copy()
+    bouges, _ = project_progress(forme, avant.copy())
+    assert bouges == 0
+    assert np.allclose(forme, avant)
+
+
+def test_les_extremites_ne_sont_jamais_repoussees():
+    route = route_qui_recule()
+    depart, arrivee = route[0].copy(), route[-1].copy()
+    project_progress(route, reference_droite())
+    assert np.allclose(route[0], depart) and np.allclose(route[-1], arrivee)
+
+
+def test_un_point_gele_sert_de_plancher_sans_bouger():
+    route = route_qui_recule()
+    fige = route[3].copy()
+    project_progress(route, reference_droite(), frozen={3})
+    assert np.allclose(route[3], fige)
+
+
+def test_un_trace_trop_court_ne_leve_pas():
+    for n in (0, 1, 2):
+        assert project_progress(np.zeros((n, 3)), reference_droite()) == (0, 0)
+
+
+def test_sans_reference_rien_n_est_touche():
+    route = route_qui_recule()
+    avant = route.copy()
+    assert project_progress(route, None) == (0, 0)
+    assert np.allclose(route, avant)
+
+
+# ----------------------------------------------------------------------
+# Retirer des points, pas seulement en ajouter
+# ----------------------------------------------------------------------
+
+def dense(n=40):
+    """Un tracé dense qui longe le mur sans le toucher."""
+    return gm.resample_by_arclength(
+        np.array([[0.0, -300.0, 0.0], [500.0, -280.0, 0.0], [1000.0, -300.0, 0.0]]), n
+    )
+
+
+def test_un_trace_trop_dense_est_elague(mur):
+    avant = dense()
+    apres, retires = prune_redundant_points(avant, mesh=mur, required_mm=25.0,
+                                            min_radius_mm=100.0)
+    assert len(retires) > 0
+    assert len(apres) == len(avant) - len(retires)
+
+
+def test_l_elagage_raccourcit_et_tend_la_courbe(mur):
+    avant = dense()
+    apres, _ = prune_redundant_points(avant, mesh=mur, required_mm=25.0,
+                                      min_radius_mm=100.0)
+    assert gm.path_length(apres) <= gm.path_length(avant) + 1e-6
+
+
+def test_l_elagage_ne_casse_jamais_le_cintrage(mur):
+    """Un point qui sert à tenir un coude n'est jamais candidat."""
+    # Un quart de cercle : le rayon réalisable y est celui de l'arc, et un
+    # coude franc de polyligne ne saurait pas l'atteindre — (c/2)/tan(45°) ne
+    # vaut que la moitié du pas d'échantillonnage.
+    angles = np.linspace(0.0, np.pi / 2.0, 40)
+    coude = np.stack([600.0 * np.cos(angles),
+                      -400.0 - 600.0 * np.sin(angles),
+                      np.zeros_like(angles)], axis=1)
+    limite = 150.0
+    assert gm.min_bend_radius(coude) >= limite, "le cas de départ doit être conforme"
+    apres, _ = prune_redundant_points(coude, mesh=mur, required_mm=25.0,
+                                      min_radius_mm=limite)
+    assert gm.min_bend_radius(apres) >= limite
+
+
+def test_l_elagage_ne_casse_jamais_la_distance(mur):
+    """Le segment de remplacement est vérifié sur toute sa longueur."""
+    frolant = gm.resample_by_arclength(
+        np.array([[0.0, -60.0, 0.0], [500.0, -200.0, 0.0], [1000.0, -60.0, 0.0]]), 40
+    )
+    apres, _ = prune_redundant_points(frolant, mesh=mur, required_mm=25.0)
+
+    from trimesh.proximity import ProximityQuery
+
+    echantillons = gm.resample_by_arclength(apres, 200)
+    closest, distance, faces = ProximityQuery(mur).on_surface(echantillons)
+    dehors = np.einsum("ij,ij->i", echantillons - closest,
+                       mur.face_normals[faces]) >= 0
+    assert np.where(dehors, distance, -distance).min() >= 25.0 - 1e-6
+
+
+def test_les_extremites_ne_sont_jamais_retirees(mur):
+    avant = dense()
+    apres, _ = prune_redundant_points(avant, mesh=mur, required_mm=25.0)
+    assert np.allclose(apres[0], avant[0]) and np.allclose(apres[-1], avant[-1])
+
+
+def test_un_point_impose_n_est_jamais_retire(mur):
+    avant = dense()
+    fige = avant[10].copy()
+    apres, retires = prune_redundant_points(avant, mesh=mur, required_mm=25.0,
+                                            frozen={10})
+    assert 10 not in retires
+    assert any(np.allclose(p, fige) for p in apres)
+
+
+def test_l_elagage_est_borne(mur):
+    _, retires = prune_redundant_points(dense(), mesh=mur, required_mm=25.0,
+                                        max_removals=2)
+    assert len(retires) <= 2
+
+
+def test_un_trace_deja_court_n_est_pas_touche(mur):
+    court = np.linspace([0.0, 0.0, 0.0], [100.0, 0.0, 0.0], 4)
+    apres, retires = prune_redundant_points(court, mesh=mur, required_mm=25.0)
+    assert retires == [] and len(apres) == 4
+
+
+def test_l_elagage_est_branche_sur_l_agent():
+    source = open("core/agent_worker.py", encoding="utf-8").read()
+    assert "safety.prune_redundant_points(" in source
+    assert "adaptive_prune_max_per_event" in source

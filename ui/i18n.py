@@ -220,6 +220,8 @@ FR: dict[str, str] = {
     "advice.applied": "Réglage appliqué à l'étape « Règles ». Relancez le cheminement pour qu'il prenne effet.",
     "advice.not_settable": "Ce conseil ne correspond à aucun réglage : suivez l'indication donnée.",
     "routing.charts": "Progression",
+    "routing.charts.expand": "Agrandir les courbes",
+    "routing.charts.shrink": "Réduire les courbes",
     "routing.advanced": "Réglages avancés",
     "routing.advanced.warn": (
         "Ces réglages n'ont normalement pas besoin d'être touchés : "
@@ -461,6 +463,8 @@ EN: dict[str, str] = {
     "advice.applied": "Setting applied in the Rules step. Restart the routing for it to take effect.",
     "advice.not_settable": "This advice maps to no setting: follow the indication given.",
     "routing.charts": "Progress",
+    "routing.charts.expand": "Enlarge charts",
+    "routing.charts.shrink": "Shrink charts",
     "routing.advanced": "Advanced settings",
     "routing.advanced.warn": (
         "These settings normally need no adjustment: the way of working chosen above "

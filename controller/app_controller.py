@@ -65,6 +65,11 @@ PASSAGE_SEGMENT_COLOR = "#1E9E5A"
 #: saisir : deux poignées voisines se recouvriraient.
 MAX_HANDLES = 14
 
+#: Rayon de la zone dans laquelle le câble doit passer quand l'utilisateur pose
+#: un point à la main. Une zone, pas une cote : c'est ce qui laisse aux agents
+#: de quoi lisser autour au lieu de plier le tracé sur un sommet figé.
+ANCHOR_TOLERANCE_MM = 30.0
+
 #: Nom réservé désignant la trajectoire retenue — la meilleure sans violation
 #: rédhibitoire — par opposition à l'état courant d'un agent.
 VALID_ROUTE = "__valid__"
@@ -111,10 +116,15 @@ class AppController:
         self._clamp_model_ok = True
         #: Résultat du dernier scan de fixations existantes.
         self.scan_result = None
+        self._scan_thread = None
+        self._scanned_folder = None
         #: Édition manuelle (BETA) : poignées posées sur le tracé.
         self.manual_editing = False
-        #: Points imposés à la main, par rang de poignée.
-        self.pinned_points: dict = {}
+        #: Points posés à la main, dans l'ordre où ils l'ont été. Une **liste**
+        #: et non un dictionnaire indexé par le rang de la poignée : ce rang
+        #: est recalculé à chaque rafraîchissement du tracé, si bien qu'un
+        #: point posé changeait de sens tout seul entre deux itérations.
+        self.pinned_points: list = []
         #: Fixations simples reconnues sur la maquette, imposées elles aussi.
         self.fixation_points: list = []
         #: Meilleure trajectoire **admissible** rencontrée depuis le lancement.
@@ -407,6 +417,7 @@ class AppController:
                     # hors zone et pour retenir les trajectoires. Deux notions
                     # de « zone » finiraient par diverger.
                     "zone_factor": ZONE_FACTOR,
+                    "anchor_tolerance_mm": ANCHOR_TOLERANCE_MM,
                     "edge_clearance_mm": (
                         rules.edge_clearance_mm
                         if rules.is_enabled("edge_clearance") else 0.0
@@ -439,11 +450,18 @@ class AppController:
             # fusion est enregistrée en ``.vtk``, un format que le détecteur ne
             # sait pas relire — il rendrait un maillage vide sans rien dire, et
             # ne trouverait donc jamais aucune fixation.
-            scan_result = fixation_scan.scan(
-                self.extraction_summary.get("fusion_path") or paths.FUSED_MESH_PATH,
-                rule_values.get("clamps_folder", ""),
-                mesh=mesh,
-            )
+            # Le scan a peut-être déjà eu lieu à l'ouverture de la vue 3D. Le
+            # refaire coûte plusieurs secondes d'ICP pour le même résultat ; on
+            # ne recommence que si le dossier de fixations a changé depuis.
+            folder = rule_values.get("clamps_folder", "")
+            if self.scan_result is not None and folder == self._scanned_folder:
+                scan_result = self.scan_result
+            else:
+                scan_result = fixation_scan.scan(
+                    self.extraction_summary.get("fusion_path") or paths.FUSED_MESH_PATH,
+                    folder, mesh=mesh,
+                )
+                self._scanned_folder = folder
             self.scan_result = scan_result
             self._post(self.view.pages[2].show_fixation_scan, scan_result)
             self._post(self._draw_fixations, scan_result)
@@ -974,6 +992,50 @@ class AppController:
         self.viewer.reset_camera()
         self.viewer.render()
 
+        # Les fixations dès la première ouverture, sans attendre le
+        # cheminement : le scan n'avait lieu qu'au lancement, si bien qu'ouvrir
+        # la vue 3D avant montrait une maquette nue. Ce sont pourtant elles
+        # qu'on veut voir pour décider où passer.
+        self._scan_fixations_async()
+
+    def _scan_fixations_async(self):
+        """Scanne les fixations en tâche de fond et les dessine.
+
+        En tâche de fond parce que le recalage ICP prend plusieurs secondes sur
+        un dossier fourni : le faire ici figerait l'interface, ce qui est
+        exactement le défaut qu'on a passé du temps à supprimer.
+        """
+        if self.scan_result is not None or self._scan_thread is not None:
+            return
+        mesh = self.mesh
+        folder = ""
+        try:
+            folder = self.view.pages[1].collect().get("clamps_folder", "")
+        except Exception:
+            pass
+        if mesh is None or not folder:
+            return
+
+        def run():
+            try:
+                result = fixation_scan.scan(
+                    self.extraction_summary.get("fusion_path") or paths.FUSED_MESH_PATH,
+                    folder, mesh=mesh,
+                )
+            except Exception:
+                result = None
+            finally:
+                self._scan_thread = None
+            if result is not None:
+                self.scan_result = result
+                self._scanned_folder = folder
+                self._post(self.view.pages[2].show_fixation_scan, result)
+                self._post(self._draw_fixations, result)
+
+        self._scan_thread = threading.Thread(target=run, daemon=True,
+                                             name="scan-fixations")
+        self._scan_thread.start()
+
     def _open_viewer_window(self):
         """Ouvre la fenêtre 3D si elle ne l'est pas déjà."""
         if self.viewer is None or not self.viewer.is_available:
@@ -1181,25 +1243,34 @@ class AppController:
         self.view.set_status(self.t("routing.view.edit.on"), "ok")
 
     def _refresh_handles(self) -> bool:
-        """Repose les poignées sur le tracé courant. Faux s'il n'y en a pas.
+        """Repose les poignées : d'abord les points posés, puis le tracé.
 
-        Une poignée par point serait illisible sur un faisceau de cinquante
-        points, et surtout impossible à saisir : on les échantillonne.
+        L'ordre n'est pas cosmétique. Les poignées étaient toutes recalculées
+        depuis le tracé courant, si bien que celle qu'on venait de déplacer
+        revenait se coller sur le câble au rafraîchissement suivant — le geste
+        de l'utilisateur s'effaçait sous ses yeux. Les points posés viennent
+        donc en tête et **ne bougent plus** ; le reste échantillonne le tracé,
+        parce qu'une poignée par point serait illisible sur un faisceau de
+        cinquante points, et surtout impossible à saisir.
         """
         if self.viewer is None or not self.manual_editing:
             return False
         points = self._current_path()
         if points is None or len(points) < 3:
             self.viewer.clear_handles()
-            return False
+            return bool(self.pinned_points)
 
         import numpy as np
 
-        interior = np.asarray(points[1:-1], dtype=float)
-        step = max(1, int(np.ceil(len(interior) / MAX_HANDLES)))
-        self._handle_indices = list(range(1, len(points) - 1, step))
+        libre = max(0, MAX_HANDLES - len(self.pinned_points))
+        interior = list(range(1, len(points) - 1))
+        step = max(1, int(np.ceil(len(interior) / libre))) if libre else len(interior) + 1
+        self._handle_indices = interior[::step][:libre]
+
         radius = max(8.0, self.rules.harness.radius_mm * 1.4 if self.rules else 20.0)
-        self.viewer.set_handles([list(points[i]) for i in self._handle_indices], radius)
+        poignees = [list(p) for p in self.pinned_points]
+        poignees += [list(points[i]) for i in self._handle_indices]
+        self.viewer.set_handles(poignees, radius)
         return True
 
     def _current_path(self):
@@ -1221,17 +1292,28 @@ class AppController:
         return best
 
     def _on_handle_moved(self, index: int, point):
-        """Une poignée vient d'être déplacée : le point devient imposé.
+        """Une poignée vient d'être déplacée : le câble devra passer par là.
 
-        La mécanique existe déjà — c'est celle des encoches. Un point imposé
-        est replacé à chaque itération puis retiré de ceux que l'agent peut
-        bouger : l'agent optimise donc autour de la décision de l'utilisateur
-        au lieu de la défaire.
+        Ce n'est **pas** un sommet imposé. Le point posé définit une zone de
+        passage de quelques centimètres, et le câble doit y entrer sans y être
+        cloué : les agents continuent de déplacer le point à l'intérieur, et
+        de lisser autour. Un sommet figé, lui, ne peut plus être lissé — le
+        tracé se plie autour au lieu de s'améliorer, et l'utilisateur défait
+        le travail des agents en croyant le guider.
+
+        Les premières poignées sont les points déjà posés : les déplacer les
+        déplace, elles ne s'ajoutent pas.
         """
         if not self.manual_editing:
             return
-        self.pinned_points[int(index)] = [float(c) for c in point]
+        position = [float(c) for c in point]
+        rank = int(index)
+        if 0 <= rank < len(self.pinned_points):
+            self.pinned_points[rank] = position
+        else:
+            self.pinned_points.append(position)
         self._publish_pinned()
+        self._refresh_handles()
         self.view.set_status(self.t("routing.view.edit.pinned"), "ok")
 
     def _publish_pinned(self, config=None):
@@ -1242,7 +1324,7 @@ class AppController:
         à savoir d'où vient une contrainte pour la respecter.
         """
         points = [list(p) for p in self.fixation_points]
-        points += [list(p) for p in self.pinned_points.values()]
+        points += [list(p) for p in self.pinned_points]
         if config is not None:
             config["pinned_points"] = points
         elif self.shared_state is not None:
@@ -1257,7 +1339,7 @@ class AppController:
             return
         self.viewer.remove_prefix("pinned_")
         radius = max(6.0, self.rules.harness.radius_mm if self.rules else 18.0)
-        for index, point in enumerate(self.pinned_points.values()):
+        for index, point in enumerate(self.pinned_points):
             self.viewer.show_sphere(point, f"pinned_{index}",
                                     radius=radius, color="#8E44AD")
         self.viewer.render()

@@ -217,6 +217,9 @@ def algo_worker(
                 np.asarray(raw_pinned, dtype=np.float32).reshape(-1, 3)
                 if len(raw_pinned) else None
             )
+            anchor_tolerance = float(
+                cfg.get("anchor_tolerance_mm", safety.DEFAULT_ANCHOR_TOLERANCE_MM)
+            )
             zone_factor = float(cfg.get("zone_factor", DEFAULT_ZONE_FACTOR))
             zone_weight = float(cfg.get("zone_weight", 90.0))
             # Bords libres : le chant de la tôle. La distance à la structure
@@ -358,6 +361,12 @@ def algo_worker(
 
             adaptive_insert_streak_threshold = cfg.get("adaptive_insert_streak_threshold", 8)
             adaptive_insert_max_per_event = int(cfg.get("adaptive_insert_max_per_event", 4))
+            # Élagage : le mouvement inverse de l'insertion. Espacé et borné,
+            # comme elle — un tracé qui perd dix points d'un coup change de
+            # forme d'un seul tenant, et l'agent repart d'ailleurs.
+            adaptive_prune_period = max(1, int(cfg.get("adaptive_prune_period", 25)))
+            adaptive_prune_max_per_event = int(cfg.get("adaptive_prune_max_per_event", 2))
+            adaptive_min_points = int(cfg.get("adaptive_min_points", 12))
             segment_violation_penalty = cfg.get("segment_violation_penalty", 15.0)
             segment_test_steps = int(cfg.get("segment_test_steps", 6))
             max_points_cfg = int(cfg.get("max_points", 150))
@@ -519,12 +528,12 @@ def algo_worker(
             # Les passages imposés sont replacés avant tout calcul : l'agent
             # travaille donc sur une trajectoire qui les respecte déjà.
             mandatory_locked = snap_comb_passages(wp_current, mandatory_combs)
-            # Un point posé à la main est une contrainte de même nature qu'une
-            # encoche : l'agent optimise autour de la décision de
-            # l'utilisateur au lieu de la défaire à l'itération suivante.
-            mandatory_locked = snap_mandatory_points(
-                wp_current, pinned_points, used=mandatory_locked
-            ) if pinned_points is not None else mandatory_locked
+            # Un point posé à la main n'est **pas** de même nature qu'une
+            # encoche : c'est une indication, pas une cote. Il impose une zone
+            # de passage, jamais un sommet figé — voir project_anchors.
+            if pinned_points is not None:
+                safety.project_anchors(wp_current, pinned_points, anchor_tolerance,
+                                       frozen=mandatory_locked)
             if mandatory_locked:
                 new_waypoints = wp_current.copy()
 
@@ -1084,10 +1093,7 @@ def algo_worker(
             # Lissage, écrêtage et repli sur la meilleure solution ont pu tirer
             # le câble hors des encoches : on l'y remet. Les indices sont
             # recalculés, le raffinement adaptatif ayant pu en insérer.
-            frozen_indices = snap_mandatory_points(
-                smoothed_waypoints, pinned_points,
-                used=snap_comb_passages(smoothed_waypoints, mandatory_combs),
-            )
+            frozen_indices = snap_comb_passages(smoothed_waypoints, mandatory_combs)
 
             # ==========================================================
             # 🛡️ PROJECTION DES CONTRAINTES RÉDHIBITOIRES
@@ -1119,6 +1125,16 @@ def algo_worker(
                     smoothed_waypoints, mesh=mesh, required_mm=required_proj,
                     min_radius_mm=min_bend_radius,
                     frozen=frozen_indices, query=local_pq,
+                    # Le chemin de départ sert de référence à l'avancement : un
+                    # cheminement en L recule franchement le long de A→B sans
+                    # revenir sur ses pas, et le juger sur la droite A→B
+                    # interdirait des trajets parfaitement valides.
+                    reference=initial_waypoints,
+                    # Les ancres posées à la main entrent dans la même boucle
+                    # que les contraintes dures, et passent **avant** elles :
+                    # une indication de l'utilisateur ne doit jamais créer un
+                    # clash, c'est la distance qui a le dernier mot.
+                    anchors=pinned_points, anchor_tolerance_mm=anchor_tolerance,
                 )
 
             test_pts = get_segment_test_points(smoothed_waypoints, steps=10)
@@ -1188,6 +1204,43 @@ def algo_worker(
                     shape_changed_this_iter = True
                     last_insert_event_iter = current_iter
                     best_at_last_insert = best_collisions
+
+                elif (not np.any(segment_violation | segment_hard_violation)
+                      and len(smoothed_waypoints) > adaptive_min_points
+                      and current_iter % adaptive_prune_period == 0):
+                    # Le mouvement inverse de l'insertion. Une fois le passage
+                    # trouvé, le tracé restait aussi dense qu'au plus fort de la
+                    # difficulté — et cette densité empêche de tendre la courbe :
+                    # plus il y a de sommets sur un arc, plus il en faut aligner
+                    # pour le redresser. On n'élague que là où le segment de
+                    # remplacement reste conforme, distance **et** cintrage : un
+                    # point qui sert à contourner quelque chose n'est jamais
+                    # candidat.
+                    with geom_lock:
+                        pruned, removed_idx = safety.prune_redundant_points(
+                            smoothed_waypoints, mesh=mesh, required_mm=safe_margin,
+                            min_radius_mm=min_bend_radius, frozen=frozen_indices,
+                            max_removals=adaptive_prune_max_per_event,
+                        )
+                    if removed_idx:
+                        smoothed_waypoints = np.asarray(
+                            pruned, dtype=smoothed_waypoints.dtype
+                        )
+                        original_waypoints = np.delete(
+                            original_waypoints, removed_idx, axis=0
+                        )
+                        if crabe_focus and locked_crabe_indices:
+                            shifted_indices, shifted_data = set(), {}
+                            for lidx in locked_crabe_indices:
+                                shift = sum(1 for r in removed_idx if r < lidx)
+                                shifted_indices.add(lidx - shift)
+                                shifted_data[lidx - shift] = locked_crabe_data[lidx]
+                            locked_crabe_indices = shifted_indices
+                            locked_crabe_data = shifted_data
+                        seg_streak = None
+                        local_pts = len(smoothed_waypoints)
+                        prev_disp = None
+                        shape_changed_this_iter = True
                 elif len(violating_idx) > 0 and budget <= 0:
                     max_points_reached_msg = f" ⚠️ max_points({max_points_cfg}) atteint, encore {len(violating_idx)} segment(s) en collision"
 
@@ -1307,6 +1360,43 @@ def algo_worker(
                     shape_changed_this_iter = True
                     last_insert_event_iter = current_iter
                     best_at_last_insert = best_collisions
+
+                elif (not np.any(segment_violation | segment_hard_violation)
+                      and len(smoothed_waypoints) > adaptive_min_points
+                      and current_iter % adaptive_prune_period == 0):
+                    # Le mouvement inverse de l'insertion. Une fois le passage
+                    # trouvé, le tracé restait aussi dense qu'au plus fort de la
+                    # difficulté — et cette densité empêche de tendre la courbe :
+                    # plus il y a de sommets sur un arc, plus il en faut aligner
+                    # pour le redresser. On n'élague que là où le segment de
+                    # remplacement reste conforme, distance **et** cintrage : un
+                    # point qui sert à contourner quelque chose n'est jamais
+                    # candidat.
+                    with geom_lock:
+                        pruned, removed_idx = safety.prune_redundant_points(
+                            smoothed_waypoints, mesh=mesh, required_mm=safe_margin,
+                            min_radius_mm=min_bend_radius, frozen=frozen_indices,
+                            max_removals=adaptive_prune_max_per_event,
+                        )
+                    if removed_idx:
+                        smoothed_waypoints = np.asarray(
+                            pruned, dtype=smoothed_waypoints.dtype
+                        )
+                        original_waypoints = np.delete(
+                            original_waypoints, removed_idx, axis=0
+                        )
+                        if crabe_focus and locked_crabe_indices:
+                            shifted_indices, shifted_data = set(), {}
+                            for lidx in locked_crabe_indices:
+                                shift = sum(1 for r in removed_idx if r < lidx)
+                                shifted_indices.add(lidx - shift)
+                                shifted_data[lidx - shift] = locked_crabe_data[lidx]
+                            locked_crabe_indices = shifted_indices
+                            locked_crabe_data = shifted_data
+                        seg_streak = None
+                        local_pts = len(smoothed_waypoints)
+                        prev_disp = None
+                        shape_changed_this_iter = True
 
                 elif len(violating_idx) > 0 and budget <= 0:
                     max_points_reached_msg = f" ⚠️ max_points({max_points_cfg}) atteint, encore {len(violating_idx)} segment(s) en collision"
@@ -1513,10 +1603,7 @@ def algo_worker(
             # Dernier épinglage : le raffinement adaptatif a pu insérer ou
             # retirer des points depuis le précédent, donc décaler les indices.
             # C'est cette trajectoire-ci qui est publiée et notée.
-            snap_mandatory_points(
-                smoothed_waypoints, pinned_points,
-                used=snap_comb_passages(smoothed_waypoints, mandatory_combs),
-            )
+            snap_comb_passages(smoothed_waypoints, mandatory_combs)
 
             # ==========================================================
             # 📋 RAPPORT DE CONFORMITÉ
@@ -1585,6 +1672,8 @@ def algo_worker(
                     "moved": projection.n_moved,
                     "clearance_left": projection.n_clearance_left,
                     "bend_left": projection.n_bend_left,
+                    "progress_left": projection.n_progress_left,
+                    "anchor_mm": projection.worst_anchor_mm,
                     "feasible": projection.feasible,
                 }
                 shared_state["algos"][algo_name]["crossings"] = n_crossings
