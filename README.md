@@ -679,6 +679,72 @@ exactement au même endroit. Trois repères le bornent désormais —
 curseur à 1, 0,5 et 0. Le curseur reste libre entre les deux ; les repères ne
 font que le rendre reproductible.
 
+## Contraintes dures : projeter, pas punir
+
+Les règles rédhibitoires — pénétration, distance minimale, rayon de cintrage —
+n'étaient portées que par la récompense. Or **une pénalité rend une trajectoire
+coûteuse, pas impossible.** Rien n'empêche un agent de converger vers un
+optimum qui viole une contrainte critique si le gain ailleurs la compense, et
+aucune mécanique d'apprentissage ne l'en empêche.
+
+`core/safety.py` ramène donc la trajectoire dans le domaine admissible après
+chaque itération. Le geste est la **projection**, pas le rejet : rejeter fait
+perdre l'itération et renvoie l'agent d'où il vient ; projeter le fait repartir
+d'un point valide. C'est le geste qui marchait déjà ailleurs — `snap_passages`
+replace le câble dans les encoches, `offset_from_surface` le décolle de la
+surface — généralisé.
+
+Deux principes le gouvernent :
+
+* **on ne déplace jamais un point gelé.** Extrémités, encoches de peigne,
+  points posés à la main : ce sont des décisions, pas des variables ;
+* **on mesure ce qu'on a obtenu.** Une contrainte peut rester inatteignable —
+  un passage plus étroit que deux fois la distance minimale. Le rapport dit
+  alors ce qui résiste, au lieu d'annoncer un domaine qu'on n'a pas atteint.
+
+Mesuré sur un couloir entre deux cloisons, 500 itérations, même graine :
+
+| | projection débranchée | projection branchée |
+|---|---|---|
+| itérations admissibles | **0 / 332** | **333 / 333** |
+| rayon de cintrage minimal | **0,0 mm** | 120,2 mm |
+| distance minimale | 25,0 mm | 25,6 mm |
+| verdict final | non admissible | **admissible** |
+
+La distance était déjà tenue par le verrou anti-contact existant : le gain
+porte sur le **rayon de cintrage**, que rien ne garantissait. Cinq cents
+itérations, et pas une n'avait produit un tracé qu'un toron réel puisse
+suivre — un rayon nul est un pli, pas un coude.
+
+### Le verrou de sortie
+
+`is_deliverable` existait déjà et ne servait qu'à colorer un badge : le
+résultat rendu était celui du meilleur **score**, conforme ou non. Le
+contrôleur retient désormais à part la meilleure trajectoire **sans violation
+rédhibitoire**, et c'est elle qu'on exporte. Les agents continuent d'explorer
+librement ; c'est la sortie qui est verrouillée, pas la recherche.
+
+La trajectoire retenue est **recopiée**, jamais référencée : l'agent continue
+de la modifier à l'itération suivante, et garder une référence laisserait la
+solution retenue redevenir invalide en silence. Quand aucune n'est admissible,
+l'onglet *Conformité* le dit en toutes lettres — un badge rouge se devine, une
+phrase se lit.
+
+## L'action, dans le repère du câble
+
+L'observation de l'agent était déjà locale : distances aux capteurs virtuels,
+direction du vide, vecteurs vers les voisins, tous projetés sur `(u, v, t)`.
+L'action, elle, restait en `ΔX, ΔY, ΔZ`. Le réseau observait donc en local et
+agissait en global, et devait réapprendre la rotation entre les deux à chaque
+endroit du DMU : la même situation géométrique, rencontrée sur une cloison
+verticale puis sur un plancher, appelait deux actions numériquement
+différentes. Elle appelle désormais la même.
+
+`u` et `v` étant orthogonaux à la tangente, le repère est orthonormé : la norme
+du déplacement est inchangée, seule son orientation devient relative au câble.
+Le cas dégénéré — câble vertical, produit vectoriel nul — était déjà traité
+dans `build_local_frame`.
+
 ## Les agents
 
 ### Rôles
@@ -774,6 +840,7 @@ core/
   diagnostics.py            conseils quand la convergence bloque
   fixation_scan.py          fixations existantes et passages imposés
   passage_route.py          quelle encoche emprunter par peigne, dans quel sens
+  safety.py                 projection des contraintes rédhibitoires
                             et quels peignes sont dans le couloir
   reward_terms.py           traduction des règles en signal d'apprentissage
   path_planner.py           recherche du chemin de départ dans l'espace libre
@@ -794,7 +861,7 @@ ui/
   charts.py                 courbes (récompense + grandeurs physiques)
   viewer3d.py               vue 3D incrustée (fil de rendu dédié)
   widgets/  pages/          composants et écrans
-tests/                      505 tests hors interface, 158 tests d'interface
+tests/                      542 tests hors interface, 158 tests d'interface
 ```
 
 `core/geometry_metrics.py`, `core/routing_rules.py`, `core/reward_terms.py` et

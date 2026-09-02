@@ -24,6 +24,7 @@ from core.agent.buffer import *
 from core.agent.tool import *
 
 from core import geometry_metrics as gm
+from core import safety
 from core import reward_terms as rwt
 from core.orchestrator import ROLES, BASE_WEIGHTS
 from core.passage_route import DEFAULT_ZONE_FACTOR
@@ -603,7 +604,24 @@ def algo_worker(
                 ]).astype(np.float32)
 
                 actions_batch = agent.select_action(obs_batch, noise=exploration_noise)
-                movements = actions_batch * local_max_shift
+
+                # L'action est exprimée dans le repère local du câble, pas en
+                # coordonnées monde. L'observation l'était déjà — distances aux
+                # capteurs, direction du vide, vecteurs vers les voisins, tous
+                # projetés sur (u, v, tangente). Agir en X/Y/Z obligeait donc le
+                # réseau à réapprendre la rotation entre les deux à chaque
+                # endroit du DMU : la même situation géométrique, rencontrée sur
+                # une cloison verticale puis sur un plancher, appelait deux
+                # actions numériquement différentes. Ici, elle appelle la même.
+                #
+                # u et v sont orthogonaux à la tangente (``build_local_frame``),
+                # le repère est donc orthonormé : la norme du déplacement est
+                # inchangée, seule son orientation devient relative au câble.
+                movements = (
+                    actions_batch[:, 0:1] * frame_u
+                    + actions_batch[:, 1:2] * frame_v
+                    + actions_batch[:, 2:3] * frame_t
+                ) * local_max_shift
 
                 guiding_forces = np.zeros_like(movements)
                 mask_sky_zone = distances[danger_indices] >= d_soft
@@ -1067,10 +1085,42 @@ def algo_worker(
             # Lissage, écrêtage et repli sur la meilleure solution ont pu tirer
             # le câble hors des encoches : on l'y remet. Les indices sont
             # recalculés, le raffinement adaptatif ayant pu en insérer.
-            snap_mandatory_points(
+            frozen_indices = snap_mandatory_points(
                 smoothed_waypoints, pinned_points,
                 used=snap_passages(smoothed_waypoints, mandatory_points),
             )
+
+            # ==========================================================
+            # 🛡️ PROJECTION DES CONTRAINTES RÉDHIBITOIRES
+            # ==========================================================
+            # Une pénalité de récompense rend une trajectoire coûteuse, pas
+            # impossible : rien n'empêche un agent de converger vers un optimum
+            # qui viole une contrainte critique si le gain ailleurs la
+            # compense. On la ramène donc dans le domaine admissible plutôt que
+            # de compter sur l'apprentissage — et on projette au lieu de
+            # rejeter, pour que l'agent reparte d'un point valide au lieu de
+            # perdre l'itération.
+            #
+            # Après l'épinglage, et avec les points épinglés gelés : une
+            # projection qui les déplacerait défairait ce que la maquette ou
+            # l'utilisateur imposent.
+            with geom_lock:
+                # La distance exigée dépend de la pièce survolée : on la relit
+                # sur la trajectoire projetée, pas sur celle d'avant l'action.
+                if clearance_model is not None and clearance_model.is_differentiated:
+                    _, _, faces_proj = local_pq.on_surface(smoothed_waypoints)
+                    required_proj = np.maximum(
+                        clearance_model.required_min(faces_proj).astype(np.float64),
+                        safe_margin,
+                    )
+                else:
+                    required_proj = np.full(len(smoothed_waypoints), safe_margin,
+                                            dtype=np.float64)
+                projection = safety.project(
+                    smoothed_waypoints, mesh=mesh, required_mm=required_proj,
+                    min_radius_mm=min_bend_radius,
+                    frozen=frozen_indices, query=local_pq,
+                )
 
             test_pts = get_segment_test_points(smoothed_waypoints, steps=10)
             with geom_lock:
@@ -1532,6 +1582,12 @@ def algo_worker(
                     shared_state["algos"][algo_name]["compliant"] = route_report.is_compliant
                     shared_state["algos"][algo_name]["deliverable"] = route_report.is_deliverable
 
+                shared_state["algos"][algo_name]["projection"] = {
+                    "moved": projection.n_moved,
+                    "clearance_left": projection.n_clearance_left,
+                    "bend_left": projection.n_bend_left,
+                    "feasible": projection.feasible,
+                }
                 shared_state["algos"][algo_name]["crossings"] = n_crossings
                 shared_state["algos"][algo_name].setdefault("crossing_history", []).append(n_crossings)
 

@@ -70,6 +70,10 @@ PASSAGE_SEGMENT_COLOR = "#1E9E5A"
 #: saisir : deux poignées voisines se recouvriraient.
 MAX_HANDLES = 14
 
+#: Nom réservé désignant la trajectoire retenue — la meilleure sans violation
+#: rédhibitoire — par opposition à l'état courant d'un agent.
+VALID_ROUTE = "__valid__"
+
 #: Cadence de rafraîchissement de l'interface pendant le calcul, en ms.
 REFRESH_RUNNING_MS = 250
 REFRESH_IDLE_MS = 700
@@ -121,6 +125,9 @@ class AppController:
         self.pinned_points: dict = {}
         #: Fixations simples reconnues sur la maquette, imposées elles aussi.
         self.fixation_points: list = []
+        #: Meilleure trajectoire **admissible** rencontrée depuis le lancement.
+        #: ``None`` tant qu'aucune ne l'a été — et c'est dit, pas masqué.
+        self.best_valid: dict | None = None
         self._handle_indices: list = []
         self._initial_path = None
         #: Quoi faire d'un clic sur une encoche. Posé le temps du choix.
@@ -424,6 +431,10 @@ class AppController:
             self._crabe_stl_path = config.get("crabe_stl_path", "")
             self._clamp_model_ok = self._check_clamp_model(self._crabe_stl_path)
             self._best_scores.clear()
+            # Une trajectoire retenue appartient à sa session : la garder d'un
+            # lancement à l'autre ferait rendre une solution calculée sur
+            # d'autres règles, voire sur une autre maquette.
+            self.best_valid = None
 
             # Analyse des fixations déjà montées, avant tout cheminement : les
             # agents doivent partir de ce qui existe plutôt que d'en reposer
@@ -907,6 +918,7 @@ class AppController:
         self.shared_state = None
         self._path_signatures.clear()
         self._best_scores.clear()
+        self.best_valid = None
         self._clamp_signature = ()
         if self.viewer is not None:
             self.viewer.remove_prefix("traj_")
@@ -1514,6 +1526,10 @@ class AppController:
             self.viewer.render()
 
     def _update_page(self, snapshot: dict, team: dict):
+        # Avant tout affichage : ce qui sera rendu à l'utilisateur n'est pas le
+        # meilleur score, c'est la meilleure trajectoire admissible.
+        self._track_valid(snapshot)
+
         ranking = team.get("ranking") or list(snapshot)
         best = ranking[0] if ranking else None
 
@@ -1565,6 +1581,8 @@ class AppController:
         self.view.pages[2].update_live(
             {
                 "report": best_state.get("report"),
+                "valid": self._valid_summary(),
+                "has_valid": self.best_valid is not None,
                 "iteration": best_state.get("iteration"),
                 "team": team,
                 "agents": agents,
@@ -1589,6 +1607,61 @@ class AppController:
             return len(getattr(mesh, "faces", [])) > 0
         except Exception:
             return False
+
+    def _track_valid(self, snapshot: dict):
+        """Retient la meilleure trajectoire **admissible** rencontrée.
+
+        ``is_deliverable`` existait et ne servait qu'à colorer un badge : rien
+        ne refusait une trajectoire enfreignant une règle rédhibitoire. Le
+        résultat rendu était celui du meilleur score, conforme ou non.
+
+        On retient donc à part la meilleure trajectoire sans violation
+        rédhibitoire — clash, distance minimale, rayon de cintrage. Les agents
+        continuent d'explorer librement ; c'est la **sortie** qui est
+        verrouillée, pas la recherche.
+
+        La trajectoire est **recopiée**, pas référencée : l'agent continue de
+        la modifier à l'itération suivante, et garder une référence laisserait
+        la solution retenue redevenir invalide en silence.
+        """
+        import copy
+
+        for name, state in (snapshot or {}).items():
+            report = state.get("report")
+            points = state.get("waypoints")
+            if report is None or points is None or not report.is_deliverable:
+                continue
+            score = state.get("score")
+            if score is None:
+                continue
+            if self.best_valid is not None and score >= self.best_valid["score"]:
+                continue
+            self.best_valid = {
+                "agent": name,
+                "score": float(score),
+                "iteration": int(state.get("iteration", 0)),
+                "waypoints": np.array(points, dtype=np.float32, copy=True),
+                "crabes": copy.deepcopy(state.get("crabes") or []),
+                "report": report,
+            }
+
+    def _valid_summary(self) -> str:
+        """Phrase d'état sur la trajectoire retenue, ou son absence."""
+        english = self.view.t.is_english
+        if self.best_valid is None:
+            return ("No admissible route yet: every run still breaks a blocking rule."
+                    if english else
+                    "Aucune trajectoire admissible pour l'instant : toutes enfreignent "
+                    "encore une règle rédhibitoire.")
+        agent = self.best_valid["agent"]
+        iteration = self.best_valid["iteration"]
+        return (f"Route retained: {agent}, iteration {iteration}."
+                if english else
+                f"Trajectoire retenue : {agent}, itération {iteration}.")
+
+    def valid_route(self):
+        """Trajectoire retenue, ou ``None`` si aucune n'est admissible."""
+        return self.best_valid
 
     def _advise(self, best_state: dict) -> list:
         """Conseils sur l'état du meilleur agent, ou liste vide s'il est trop tôt.
@@ -1676,17 +1749,31 @@ class AppController:
     # ==================================================================
 
     def export(self, agent_name: str, kind: str) -> str:
-        """Exporte le tracé d'un agent. Renvoie le nom du fichier écrit."""
-        if self.shared_state is None:
-            return ""
+        """Exporte un tracé. Renvoie le nom du fichier écrit.
 
-        with self.data_lock:
-            state = self.shared_state.get("algos", {}).get(agent_name)
-            if state is None:
+        ``agent_name`` vaut :data:`VALID_ROUTE` pour exporter la trajectoire
+        **retenue** — la meilleure sans violation rédhibitoire — plutôt que
+        l'état courant d'un agent, qui peut être meilleur au score tout en
+        étant inadmissible.
+        """
+        if agent_name == VALID_ROUTE:
+            if self.best_valid is None:
+                self.view.set_status(self._valid_summary(), "warn")
                 return ""
-            waypoints = np.asarray(state["waypoints"], dtype=np.float64).copy()
-            crabes = list(state.get("crabes", []))
-            report = state.get("report")
+            waypoints = np.asarray(self.best_valid["waypoints"], dtype=np.float64).copy()
+            crabes = list(self.best_valid["crabes"])
+            report = self.best_valid["report"]
+            agent_name = self.best_valid["agent"]
+        else:
+            if self.shared_state is None:
+                return ""
+            with self.data_lock:
+                state = self.shared_state.get("algos", {}).get(agent_name)
+                if state is None:
+                    return ""
+                waypoints = np.asarray(state["waypoints"], dtype=np.float64).copy()
+                crabes = list(state.get("crabes", []))
+                report = state.get("report")
 
         if len(waypoints) < 2:
             return ""

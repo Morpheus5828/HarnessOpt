@@ -429,6 +429,15 @@ class RoutingPage(ctk.CTkFrame):
             self.tabs.tab(self._tab_names["compliance"]), fg_color="transparent"
         )
         compliance_tab.pack(fill="both", expand=True)
+        # Ce qui sera rendu à l'utilisateur n'est pas le meilleur score, c'est
+        # la meilleure trajectoire admissible — et quand il n'y en a aucune, il
+        # faut le lire, pas le deviner d'un badge rouge.
+        self.lbl_valid = ctk.CTkLabel(
+            compliance_tab, text="", font=FONT.SMALL_BOLD,
+            text_color=theme.TEXT_SOFT, anchor="w", justify="left", wraplength=760,
+        )
+        self.lbl_valid.pack(fill="x", pady=(0, SPACE.SM))
+
         self.compliance = ComplianceTable(compliance_tab, lang=self.app.t.lang)
         self.compliance.set_placeholder(t("report.verdict.none"))
         self.compliance.pack(fill="both", expand=True)
@@ -601,6 +610,13 @@ class RoutingPage(ctk.CTkFrame):
 
         report = snapshot.get("report")
         self.compliance.update_report(report)
+
+        valid = snapshot.get("valid")
+        if valid is not None:
+            self.lbl_valid.configure(
+                text=("🔒  " if snapshot.get("has_valid") else "⚠️  ") + valid,
+                text_color=theme.ok if snapshot.get("has_valid") else theme.warn,
+            )
         self.advice_board.update_advice(snapshot.get("advice"))
         self._refresh_advice_tab()
 
