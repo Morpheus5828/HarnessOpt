@@ -63,6 +63,26 @@ DEFAULT_CORRIDOR_FACTOR = 3.5
 #: directement à « sans contrainte » plutôt que de diviser indéfiniment.
 MIN_EDGE_CLEARANCE_MM = 2.0
 
+#: Écart toléré entre le tracé rendu et la surface, en mm. Au-delà, le segment
+#: fautif est coupé en deux et son milieu ramené sur la surface.
+DEFAULT_SURFACE_TOLERANCE_MM = 1.0
+
+#: Nombre de bissections successives. Sur une surface courbe chaque passe
+#: divise la longueur des segments par deux, donc la flèche par quatre : la
+#: convergence y est immédiate. Sur une **arête vive** elle n'est que linéaire,
+#: d'où la réserve de passes.
+MAX_STICK_PASSES = 8
+
+#: Longueur en deçà de laquelle un segment n'est plus coupé. Aucune polyligne
+#: ne peut épouser une arête vive : là, la corde coupe le coin quoi qu'on
+#: fasse, et bissecter indéfiniment n'ajoute que des points. Sous deux
+#: millimètres, l'excursion résiduelle n'a plus de sens pour un toron de vingt.
+MIN_STICK_SEGMENT_MM = 2.0
+
+#: Plafond de points ajoutés par le collage, en multiple du tracé d'entrée. Un
+#: maillage pathologique ne doit pas faire enfler la trajectoire sans fin.
+STICK_GROWTH_LIMIT = 6
+
 NO_MESH = "no_mesh"
 NO_PATH = "no_path"
 NO_SCIPY = "no_scipy"
@@ -268,6 +288,7 @@ def surface_path(
     keep = _corridor_mask(all_vertices, start, goal, corridor_factor)
     edge_mask, edge_applied = _edge_mask(mesh, all_vertices, float(edge_clearance_mm))
     keep &= edge_mask
+
     index_map = np.full(len(all_vertices), -1, dtype=np.int64)
     index_map[keep] = np.arange(int(keep.sum()))
     vertices = all_vertices[keep]
@@ -444,7 +465,169 @@ def surface_path(
     )
 
 
-def offset_from_surface(mesh, points, target_mm, passes=4):
+def _measure_clearance(mesh, points, query=None, samples: int = 9) -> float:
+    """Marge minimale du tracé rendu, **segments compris**.
+
+    Mesurer les seuls sommets annonçait 25 mm sur un tracé dont les cordes
+    redescendaient à 0,4 mm de la structure.
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    if len(pts) == 0:
+        return 0.0
+    if len(pts) == 1:
+        return float(signed_distances(mesh, pts, query=query)[0][0])
+
+    ratios = np.linspace(0.0, 1.0, max(3, int(samples)))
+    echantillons = np.concatenate([
+        pts[:-1] + ratio * (pts[1:] - pts[:-1]) for ratio in ratios
+    ])
+    mesures, _, _ = signed_distances(mesh, echantillons, query=query)
+    return float(mesures.min())
+
+
+def signed_distances(mesh, points, query=None):
+    """Distance à la surface, **négative dans la matière**.
+
+    ``ProximityQuery.on_surface`` rend une distance non signée : un point
+    enfoncé de 20 mm dans une tôle et un point posé 20 mm au-dessus lui sont
+    indiscernables. C'est précisément la confusion qu'il ne faut pas faire ici.
+    """
+    from trimesh.proximity import ProximityQuery
+
+    pts = np.asarray(points, dtype=np.float64)
+    query = query if query is not None else ProximityQuery(mesh)
+    closest, distance, faces = query.on_surface(pts)
+    normals = mesh.face_normals[faces]
+    outward = np.einsum("ij,ij->i", pts - closest, normals) >= 0
+    return np.where(outward, distance, -distance), closest, normals
+
+
+def surface_gap(mesh, points, query=None, samples: int = 9):
+    """De combien les **segments** s'écartent de la distance qu'ils promettent.
+
+    Mesurer les seuls sommets ne dit rien : ils viennent du maillage, ou d'une
+    projection, et sont donc à la bonne distance par construction — pendant que
+    la corde qui les relie plonge dans la matière. On échantillonne donc le
+    long de chaque segment.
+
+    L'écart se compte **par rapport à ce qu'annoncent les extrémités**, pas
+    dans l'absolu. Un segment qui joint un connecteur posé à 50 mm de la tôle à
+    un point de surface est censé traverser cet intervalle, ce n'est pas un
+    défaut ; un segment dont les deux bouts sont à 25 mm est censé y rester.
+    Ce qui compte est l'écart *en plus* de cette interpolation, dans un sens
+    comme dans l'autre : se rapprocher de la structure met le câble en
+    interférence, s'en éloigner veut dire qu'il ne la suit plus.
+
+    Returns:
+        ``(écart_max_mm, écarts_par_segment)``.
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    if len(pts) < 2:
+        return 0.0, np.zeros(0)
+
+    from trimesh.proximity import ProximityQuery
+
+    query = query if query is not None else ProximityQuery(mesh)
+    aux_sommets, _, _ = signed_distances(mesh, pts, query=query)
+
+    ratios = np.linspace(0.0, 1.0, max(3, int(samples)))[1:-1]
+    debut, fin = pts[:-1], pts[1:]
+    d_debut, d_fin = aux_sommets[:-1], aux_sommets[1:]
+
+    ecarts = np.zeros(len(debut))
+    for ratio in ratios:
+        echantillons = debut + ratio * (fin - debut)
+        mesures, _, _ = signed_distances(mesh, echantillons, query=query)
+        attendu = d_debut + ratio * (d_fin - d_debut)
+        ecarts = np.maximum(ecarts, np.abs(mesures - attendu))
+
+    return float(ecarts.max()), ecarts
+
+
+def stick_to_surface(mesh, points, tolerance_mm: float = DEFAULT_SURFACE_TOLERANCE_MM,
+                     query=None, keep=(), target_mm: float | None = None):
+    """Fait tenir au tracé la distance qu'il annonce, segments compris.
+
+    Le plus court chemin rendu par Dijkstra passe par des **sommets** du
+    maillage : ceux-là sont bien sur la surface. Les segments droits qui les
+    relient, non. Là où le maillage est grossier — le flanc d'un cylindre n'a
+    de sommets qu'à ses deux couronnes — la corde coupe au travers : mesuré
+    17,4 mm à l'intérieur de la matière sur un cylindre de 300 mm de diamètre.
+    Le rééchantillonnage aggrave le défaut au lieu de le corriger, puisqu'il
+    interpole **en ligne droite** sur cette polyligne : à 68 points, six
+    sommets se retrouvaient dans la matière, jusqu'à 17,1 mm.
+
+    Le même défaut se reproduit un cran plus haut, sur le tracé **décalé** :
+    deux points posés à 25 mm de part et d'autre d'une lisse sont bien à 25 mm,
+    et la corde qui les joint redescend à 0,4 mm de la structure.
+
+    On coupe donc en deux tout segment qui s'écarte de la distance annoncée par
+    ses extrémités, et l'on repose son milieu à cette distance. Une passe
+    divise la longueur par deux, donc la flèche par quatre : le tracé ne se
+    densifie que là où la géométrie l'exige — une portion plane n'y gagne aucun
+    point.
+
+    Les extrémités ne sont jamais déplacées : ce sont le départ et l'arrivée
+    demandés, qui n'ont aucune raison d'être sur une tôle.
+
+    Args:
+        mesh: maillage trimesh.
+        points: tracé ``(n, 3)``.
+        tolerance_mm: écart toléré avant bissection.
+        query: ``ProximityQuery`` déjà construit, le cas échéant.
+        keep: indices à ne pas déplacer, en plus des extrémités.
+        target_mm: distance à tenir. ``None`` conserve celle de chaque point,
+            ``0`` ramène le tracé sur la surface.
+
+    Returns:
+        ``(tracé, écart_maximal_restant_mm)``.
+    """
+    from trimesh.proximity import ProximityQuery
+
+    pts = np.asarray(points, dtype=np.float64).copy()
+    if len(pts) < 2:
+        return pts, 0.0
+
+    query = query if query is not None else ProximityQuery(mesh)
+    tolerance = max(1e-6, float(tolerance_mm))
+    plafond = max(len(pts) * STICK_GROWTH_LIMIT, len(pts) + 8)
+
+    # Les sommets d'abord : le rééchantillonnage les a posés sur des cordes,
+    # pas à la distance visée. Les extrémités et les points imposés restent où
+    # ils sont — les déplacer changerait le trajet demandé.
+    protege = {0, len(pts) - 1} | {int(i) for i in (keep or ())}
+    mobiles = np.array([i for i in range(len(pts)) if i not in protege], dtype=int)
+    if len(mobiles) and target_mm is not None:
+        _, closest, normals = signed_distances(mesh, pts[mobiles], query=query)
+        pts[mobiles] = closest + normals * float(target_mm)
+
+    for _ in range(MAX_STICK_PASSES):
+        if len(pts) >= plafond:
+            break
+        _, ecarts = surface_gap(mesh, pts, query=query)
+        longueurs = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+        fautifs = np.where((ecarts > tolerance)
+                           & (longueurs > MIN_STICK_SEGMENT_MM))[0]
+        if not len(fautifs):
+            break
+
+        fautifs = fautifs[: max(1, plafond - len(pts))]
+        milieux = 0.5 * (pts[fautifs] + pts[fautifs + 1])
+
+        # Le milieu inséré est reposé à la distance qu'annonçaient ses voisins,
+        # le long de la normale de la face la plus proche. Un segment dont une
+        # extrémité est loin de la tôle n'est donc pas rabattu dessus.
+        aux, _, _ = signed_distances(mesh, pts, query=query)
+        attendu = 0.5 * (aux[fautifs] + aux[fautifs + 1])
+        _, closest, normals = signed_distances(mesh, milieux, query=query)
+        inseres = closest + normals * attendu[:, None]
+
+        pts = np.insert(pts, fautifs + 1, inseres, axis=0)
+
+    return pts, surface_gap(mesh, pts, query=query)[0]
+
+
+def offset_from_surface(mesh, points, target_mm, passes=4, query=None):
     """Décolle un tracé de la surface, jusqu'à la distance visée.
 
     Un chemin de surface est **sur** la surface : sa distance au DMU vaut zéro
@@ -462,6 +645,9 @@ def offset_from_surface(mesh, points, target_mm, passes=4):
         points: tracé ``(n, 3)``.
         target_mm: distance visée, en mm.
         passes: nombre de reprises.
+        query: ``ProximityQuery`` déjà construit. Le construire coûte plusieurs
+            secondes sur une maquette de 800 000 triangles : les étapes qui se
+            succèdent ici se le partagent au lieu d'en bâtir un chacune.
 
     Returns:
         ``(points, distance_minimale_mesurée)``. La distance est mesurée contre
@@ -474,7 +660,7 @@ def offset_from_surface(mesh, points, target_mm, passes=4):
     if len(result) == 0 or target_mm <= 0:
         return result, 0.0
 
-    query = ProximityQuery(mesh)
+    query = query if query is not None else ProximityQuery(mesh)
     for _ in range(max(1, int(passes))):
         closest, distance, faces = query.on_surface(result)
         normals = mesh.face_normals[faces]
@@ -495,7 +681,7 @@ def offset_from_surface(mesh, points, target_mm, passes=4):
     return result, float(signed.min())
 
 
-def unfold(mesh, points, target_mm, rounds: int = 3):
+def unfold(mesh, points, target_mm, rounds: int = 3, query=None):
     """Décolle le tracé **sans le replier sur lui-même**.
 
     Le décalage seul plie le tracé sur une maquette fusionnée. Chaque point est
@@ -521,13 +707,13 @@ def unfold(mesh, points, target_mm, rounds: int = 3):
     result = np.array(points, dtype=np.float64, copy=True)
     clearance = 0.0
     for _ in range(max(1, int(rounds))):
-        result, clearance = offset_from_surface(mesh, result, target_mm)
+        result, clearance = offset_from_surface(mesh, result, target_mm, query=query)
         unfolded, removed = remove_backtracking(result)
         if not removed:
             break
         result = unfolded
 
-    result, clearance = offset_from_surface(mesh, result, target_mm)
+    result, clearance = offset_from_surface(mesh, result, target_mm, query=query)
     return result, clearance, _count_folds(result)
 
 
