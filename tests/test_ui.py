@@ -552,21 +552,29 @@ class TestEnTeteEtBarreDEtat:
 
 
 class TestConseils:
-    """Onglet « Conseils » de la page Cheminement."""
+    """Le moteur de conseils et son bandeau.
 
-    def test_l_onglet_existe(self, app):
-        assert "advice" in app.pages[2]._tab_names
+    Le bandeau n'est plus affiché sur la page Cheminement, qui ne porte
+    désormais que l'avancement et les courbes. Le widget et le moteur restent
+    testés ici : c'est le chemin de retour si les conseils doivent reparaître.
+    """
 
-    def test_aucun_conseil_affiche_une_explication(self, app):
-        board = app.pages[2].advice_board
+    @pytest.fixture
+    def board(self, root):
+        from ui.widgets import AdviceBoard
+
+        widget = AdviceBoard(root, lang="FR", on_apply=lambda _s: None)
+        yield widget
+        widget.destroy()
+
+    def test_aucun_conseil_affiche_une_explication(self, board):
         board.clear()
         assert board.count() == 0
         assert "conseil" in board.lbl_empty.cget("text").lower()
 
-    def test_un_conseil_produit_une_carte(self, app):
+    def test_un_conseil_produit_une_carte(self, board):
         from core.diagnostics import Suggestion
 
-        board = app.pages[2].advice_board
         board.update_advice([Suggestion(
             key="k", severity="major",
             title_fr="Titre", title_en="Title",
@@ -574,11 +582,8 @@ class TestConseils:
             action_fr="Action", action_en="Action",
             setting="min_margin", value=6.0,
         )])
-        try:
-            assert board.count() == 1
-            assert len(board.cards_box.winfo_children()) == 1
-        finally:
-            board.clear()
+        assert board.count() == 1
+        assert len(board.cards_box.winfo_children()) == 1
 
     def test_un_conseil_sans_reglage_n_a_pas_de_bouton(self, app):
         from core.diagnostics import Suggestion
@@ -635,21 +640,21 @@ class TestConseils:
             action_fr="A", action_en="A",
         )) is False
 
-    def test_l_onglet_annonce_le_nombre_de_conseils(self, app):
+    def test_le_bandeau_compte_ce_qu_il_porte(self, board):
         from core.diagnostics import Suggestion
 
-        page = app.pages[2]
-        page.advice_board.update_advice([
+        board.update_advice([
             Suggestion(key=f"k{i}", severity="info", title_fr="T", title_en="T",
                        detail_fr="D", detail_en="D", action_fr="A", action_en="A")
             for i in range(2)
         ])
-        page._refresh_advice_tab()
-        try:
-            assert "(2)" in page._tab_names["advice"]
-        finally:
-            page.advice_board.clear()
-            page._refresh_advice_tab()
+        assert board.count() == 2
+
+    def test_la_page_de_cheminement_ne_porte_plus_de_conseils(self, app):
+        """Pendant un calcul, la page ne montre que l'avancement et les courbes."""
+        page = app.pages[2]
+        for absent in ("advice_board", "compliance", "agent_board", "tabs", "lbl_valid"):
+            assert not hasattr(page, absent), f"{absent} devrait avoir disparu"
 
 
 class TestScanDeFixations:
@@ -990,11 +995,33 @@ class TestVue3DUnique:
         finally:
             page.set_detached(False)
 
-    def test_les_onglets_recuperent_la_hauteur(self, app):
-        """La 3D vivant ailleurs, conformité et courbes prennent la place."""
-        right = app.pages[2].tabs.master
+    def test_les_courbes_recuperent_la_hauteur(self, app):
+        """La 3D vivant ailleurs, les courbes prennent toute la place."""
+        right = app.pages[2].charts_card.master
         assert right.grid_rowconfigure(4)["weight"] > 0
         assert right.grid_rowconfigure(3)["weight"] == 0
+
+    def test_le_bandeau_d_etat_ne_prend_plus_de_place(self, app):
+        """Il réclamait 216 px pour une ligne que la barre d'état affiche déjà."""
+        page = app.pages[2]
+        app.update_idletasks()
+        assert page.viewer_container.winfo_reqheight() <= 8
+
+    def test_il_reste_de_quoi_dire_que_la_3d_est_indisponible(self, app):
+        """Se réduire à rien ne doit pas vouloir dire se taire."""
+        from ui.viewer3d import Viewer3D
+
+        page = app.pages[2]
+        viewer = Viewer3D(page.viewer_container)
+        try:
+            viewer._show_placeholder("Vue 3D indisponible sur ce poste.")
+            app.update_idletasks()
+            assert page.viewer_container.winfo_reqheight() > 20
+            assert viewer._placeholder.cget("text")
+        finally:
+            if viewer._placeholder is not None:
+                viewer._placeholder.destroy()
+            viewer.close()
 
 
 class TestModesDExploration:
@@ -1063,9 +1090,11 @@ class TestRegleDuBordDeTole:
 class TestCourbesEnGrand:
     """Les courbes sont ce qu'on regarde pendant le calcul."""
 
-    def test_les_courbes_sont_l_onglet_par_defaut(self, app):
+    def test_les_courbes_occupent_seules_le_bas_de_page(self, app):
+        """Elles ne partagent plus la place avec trois onglets sur quatre."""
         page = app.pages[2]
-        assert page.tabs.get() == page._tab_names["charts"]
+        assert page.charts_card.grid_info()["row"] == 4
+        assert page.charts_container.winfo_manager() == "pack"
 
     def test_le_bouton_agrandit_puis_reduit(self, app):
         page = app.pages[2]
@@ -1102,3 +1131,195 @@ class TestCourbesEnGrand:
 
         for cle in ("routing.charts.expand", "routing.charts.shrink"):
             assert FR[cle].strip() and EN[cle].strip()
+
+
+class TestSurimpressions3D:
+    """Le tableau des métriques et la légende de la fenêtre 3D.
+
+    Les courbes disent la tendance, pas la valeur : on y lit qu'un rayon de
+    cintrage monte, pas qu'il vaut 118 mm pour une limite à 120.
+    """
+
+    @pytest.fixture(autouse=True)
+    def spans_vierges(self, app):
+        """La fenêtre est partagée par les tests : l'historique, non."""
+        app.controller._metric_spans.clear()
+        yield
+        app.controller._metric_spans.clear()
+
+    @staticmethod
+    def instantane(reward=1.0, **overrides):
+        return {"reward": reward, "iteration": 12, "report": sample_report(**overrides)}
+
+    def test_le_tableau_porte_chaque_metrique(self, app):
+        from controller.app_controller import OVERLAY_METRICS
+
+        ctrl = app.controller
+        snapshot = {"TD3": self.instantane()}
+        ctrl._track_spans(snapshot)
+        table = ctrl._metrics_table("TD3", snapshot["TD3"])
+        for _key, label_fr, _label_en, _dec in OVERLAY_METRICS:
+            assert label_fr in table, f"{label_fr} absent du tableau"
+
+    def test_le_tableau_nomme_l_agent_et_son_iteration(self, app):
+        ctrl = app.controller
+        snapshot = {"TD3": self.instantane()}
+        ctrl._track_spans(snapshot)
+        entete = ctrl._metrics_table("TD3", snapshot["TD3"]).splitlines()[0]
+        assert "TD3" in entete and "12" in entete
+
+    def test_les_colonnes_sont_alignees(self, app):
+        """Sans chasse fixe ni largeur constante, le tableau devient illisible."""
+        ctrl = app.controller
+        snapshot = {"TD3": self.instantane()}
+        ctrl._track_spans(snapshot)
+        lignes = ctrl._metrics_table("TD3", snapshot["TD3"]).splitlines()[2:]
+        largeurs = {len(ligne) for ligne in lignes}
+        assert len(largeurs) == 1, f"lignes de largeurs différentes : {largeurs}"
+
+    def test_l_etendue_s_elargit_avec_la_session(self, app):
+        ctrl = app.controller
+        ctrl._track_spans({"TD3": self.instantane(reward=5.0)})
+        ctrl._track_spans({"TD3": self.instantane(reward=-3.0)})
+        ctrl._track_spans({"TD3": self.instantane(reward=1.0)})
+        bas, haut = ctrl._metric_spans["TD3"]["reward"]
+        assert bas == pytest.approx(-3.0)
+        assert haut == pytest.approx(5.0)
+
+    def test_la_valeur_courante_est_la_derniere_vue(self, app):
+        ctrl = app.controller
+        ctrl._track_spans({"TD3": self.instantane(reward=5.0)})
+        etat = self.instantane(reward=-3.0)
+        ctrl._track_spans({"TD3": etat})
+        ligne = [l for l in ctrl._metrics_table("TD3", etat).splitlines()
+                 if l.startswith("Récompense")][0]
+        assert ligne.split()[-1] == "-3.0"
+
+    def test_l_etendue_est_suivie_par_agent(self, app):
+        """Mélanger cinq historiques afficherait un minimum jamais atteint."""
+        ctrl = app.controller
+        ctrl._track_spans({"TD3": self.instantane(reward=5.0),
+                           "SAC": self.instantane(reward=-40.0)})
+        assert ctrl._metric_spans["TD3"]["reward"][0] == pytest.approx(5.0)
+        assert ctrl._metric_spans["SAC"]["reward"][0] == pytest.approx(-40.0)
+
+    def test_un_agent_sans_rapport_ne_fausse_rien(self, app):
+        ctrl = app.controller
+        ctrl._track_spans({"TD3": {"reward": 1.0, "iteration": 0, "report": None}})
+        assert "TD3" not in ctrl._metric_spans
+        assert ctrl._metrics_table("TD3", {"report": None}) == ""
+
+    def test_un_troncon_droit_ne_fait_pas_deborder_la_colonne(self, app):
+        """Un rayon infini ne s'affiche pas : il est plafonné."""
+        from controller.app_controller import OVERLAY_BEND_CAP_MM
+
+        ctrl = app.controller
+        etat = self.instantane()
+        valeurs = ctrl._metric_values(etat)
+        assert valeurs["min_bend_radius_mm"] <= OVERLAY_BEND_CAP_MM
+
+    def test_l_etendue_est_remise_a_zero_avec_la_session(self, app):
+        """Des extrema qu'aucun agent n'atteindra plus n'ont rien à afficher."""
+        ctrl = app.controller
+        ctrl._track_spans({"TD3": self.instantane()})
+        assert ctrl._metric_spans
+        # reset_routing sort tout de suite sans session en cours : on lui en
+        # donne une, vide, pour parcourir la remise à zéro.
+        ctrl.shared_state = {"is_playing": False, "is_running": False}
+        try:
+            ctrl.reset_routing()
+        finally:
+            ctrl.shared_state = None
+        assert ctrl._metric_spans == {}
+
+
+class TestLegende3D:
+    """La légende relie chaque couleur de trajectoire à son agent.
+
+    Cinq trajectoires de cinq couleurs ne se lisent pas sans dire laquelle
+    appartient à qui, ni laquelle mène le classement.
+    """
+
+    class FauxViewer:
+        is_available = True
+
+        def __init__(self):
+            self.metrics = None
+            self.legend = None
+            self.best = "__jamais_appele__"
+
+        def set_metrics(self, text):
+            self.metrics = text
+
+        def set_legend(self, entries):
+            self.legend = list(entries)
+
+        def set_best_agent(self, name):
+            self.best = name
+
+    @pytest.fixture
+    def ctrl(self, app):
+        controller = app.controller
+        vrai_viewer, vraies_couleurs = controller.viewer, controller.benchmark_algos
+        controller.viewer = self.FauxViewer()
+        controller.benchmark_algos = {
+            "TD3": {"color": "#2D7FF9"},
+            "SAC": {"color": "#E08A00"},
+        }
+        controller._metric_spans.clear()
+        yield controller
+        controller.viewer, controller.benchmark_algos = vrai_viewer, vraies_couleurs
+        controller._metric_spans.clear()
+
+    @staticmethod
+    def instantane():
+        etat = {"reward": 1.0, "iteration": 4, "report": sample_report()}
+        return {"TD3": dict(etat), "SAC": dict(etat)}
+
+    def test_chaque_agent_a_sa_ligne_et_sa_couleur(self, ctrl):
+        ctrl._update_overlays(self.instantane(), {"ranking": ["SAC", "TD3"]},
+                              {"TD3": "#2D7FF9", "SAC": "#E08A00"})
+        couleurs = [couleur for _, couleur in ctrl.viewer.legend]
+        assert couleurs == ["#E08A00", "#2D7FF9"]
+        assert all(nom in " ".join(l for l, _ in ctrl.viewer.legend)
+                   for nom in ("TD3", "SAC"))
+
+    def test_la_legende_est_dans_l_ordre_du_classement(self, ctrl):
+        ctrl._update_overlays(self.instantane(), {"ranking": ["SAC", "TD3"]},
+                              {"TD3": "#2D7FF9", "SAC": "#E08A00"})
+        libelles = [l for l, _ in ctrl.viewer.legend]
+        assert libelles[0].startswith("1.") and "SAC" in libelles[0]
+        assert libelles[1].startswith("2.") and "TD3" in libelles[1]
+
+    def test_le_meilleur_est_signale(self, ctrl):
+        """En toutes lettres : la police de VTK ne connaît pas ★."""
+        ctrl._update_overlays(self.instantane(), {"ranking": ["SAC", "TD3"]}, {})
+        premier, second = (l for l, _ in ctrl.viewer.legend)
+        assert "meilleur" in premier and "meilleur" not in second
+
+    def test_la_legende_s_en_tient_au_latin_1(self, ctrl):
+        """La police vectorielle de VTK n'affiche rien au-delà : ★, ▶, →, ∞."""
+        ctrl._update_overlays(self.instantane(), {"ranking": ["SAC", "TD3"]},
+                              {"TD3": "#2D7FF9", "SAC": "#E08A00"})
+        texte = " ".join(l for l, _ in ctrl.viewer.legend) + ctrl.viewer.metrics
+        for glyphe in ("★", "▶", "→", "∞"):
+            assert glyphe not in texte, f"{glyphe} ne se rendra pas dans la fenêtre 3D"
+
+    def test_le_filtre_recoit_le_meilleur_agent(self, ctrl):
+        ctrl._update_overlays(self.instantane(), {"ranking": ["SAC", "TD3"]}, {})
+        assert ctrl.viewer.best == "SAC"
+
+    def test_le_tableau_decrit_le_meilleur_agent(self, ctrl):
+        ctrl._update_overlays(self.instantane(), {"ranking": ["SAC", "TD3"]}, {})
+        assert ctrl.viewer.metrics.splitlines()[0].startswith("SAC")
+
+    def test_sans_classement_l_ordre_du_instantane_fait_foi(self, ctrl):
+        """Au démarrage l'orchestrateur n'a encore classé personne."""
+        ctrl._update_overlays(self.instantane(), {}, {})
+        assert ctrl.viewer.best in ("TD3", "SAC")
+        assert len(ctrl.viewer.legend) == 2
+
+    def test_un_instantane_vide_ne_leve_pas(self, ctrl):
+        ctrl._update_overlays({}, {}, {})
+        assert ctrl.viewer.legend == []
+        assert ctrl.viewer.best is None

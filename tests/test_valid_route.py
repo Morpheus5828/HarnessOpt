@@ -196,9 +196,15 @@ def test_une_relance_oublie_la_solution_precedente():
 
 
 def test_le_verrou_est_branche_sur_le_rafraichissement():
+    """Le verrou tourne à chaque rafraîchissement, pas seulement à l'export.
+
+    Le résumé, lui, n'apparaît plus sur la page de cheminement : elle ne porte
+    que l'avancement et les courbes. Il reste dit au moment où il engage —
+    quand on demande la trajectoire et qu'il n'y en a aucune d'admissible.
+    """
     source = open("controller/app_controller.py", encoding="utf-8").read()
     assert "self._track_valid(snapshot)" in source
-    assert '"valid": self._valid_summary()' in source
+    assert "self.view.set_status(self._valid_summary()" in source
 
 
 def test_le_verrou_porte_sur_les_regles_redhibitoires():

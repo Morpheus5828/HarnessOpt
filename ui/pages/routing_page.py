@@ -29,11 +29,8 @@ from core.orchestrator import (
 from core.path_planner import STRATEGIES
 from ui.theme import FONT, SPACE, current
 from ui.widgets import (
-    AdviceBoard,
-    AgentBoard,
     Card,
     ChoiceField,
-    ComplianceTable,
     CoordinateField,
     KpiRow,
     NumberField,
@@ -432,79 +429,30 @@ class RoutingPage(ctk.CTkFrame):
         self.btn_charts_window.pack(side="right", padx=(0, SPACE.MD))
 
         # --- état de la vue 3D --------------------------------------------------
-        # La petite vue incrustée est supprimée : elle coûtait une capture
-        # d'écran par image pour montrer une scène figée, et se disputait le
-        # pilote graphique avec la vraie fenêtre. Il ne reste ici qu'un état.
-        view_frame = self.view_state = ctk.CTkFrame(
-            right, fg_color=theme.SURFACE, border_width=1,
-            border_color=theme.BORDER, corner_radius=SPACE.RADIUS,
+        # Le bandeau encadré qui tenait cette place réclamait 216 pixels pour
+        # une ligne de texte que la barre d'état affiche déjà — un cadre vide
+        # posé entre les étapes et les courbes. Il ne reste que le conteneur
+        # que réclame Viewer3D : il se réduit à rien tant qu'il est vide, et ne
+        # s'ouvre que pour dire, le cas échéant, que la 3D est indisponible
+        # sur ce poste.
+        self.view_state = self.viewer_container = ctk.CTkFrame(
+            right, fg_color="transparent", height=1,
         )
-        view_frame.grid(row=3, column=0, sticky="ew", pady=(0, SPACE.SM))
+        self.viewer_container.grid(row=3, column=0, sticky="ew")
 
-        self.viewer_container = ctk.CTkFrame(view_frame, fg_color="transparent")
-        self.viewer_container.pack(fill="x", padx=SPACE.MD, pady=SPACE.SM)
+        # --- les courbes, et rien d'autre -----------------------------------------
+        # Conformité, conseils et tableau des agents occupaient ici trois
+        # onglets sur quatre. Pendant un calcul on ne les lit pas : ce qu'on
+        # suit, ce sont les courbes, et un quart de colonne ne suffit pas à les
+        # lire. La conformité se lit à la fin, sur la page Résultats, qui porte
+        # sa propre table ; les performances de chaque agent se lisent dans la
+        # légende de la fenêtre 3D, à côté de sa trajectoire.
+        charts_card = self.charts_card = Card(right, title=t("routing.charts"), icon="📈")
+        charts_card.grid(row=4, column=0, sticky="nsew")
 
-        # --- sorties vivantes, en onglets -----------------------------------------
-        # Conformité, agents et courbes se disputaient la place avec la vue 3D.
-        # En onglets, chacun dispose de toute la largeur, et la conformité — la
-        # seule information dont l'utilisateur a réellement besoin — est celle
-        # qui s'affiche par défaut.
-        self.tabs = ctk.CTkTabview(
-            right, fg_color=theme.SURFACE, segmented_button_selected_color=theme.accent,
-            segmented_button_selected_hover_color=theme.accent, corner_radius=SPACE.RADIUS,
-        )
-        self.tabs.grid(row=4, column=0, sticky="nsew")
-
-        self._tab_names = {
-            "compliance": t("routing.compliance"),
-            "advice": t("routing.advice"),
-            "agents": t("routing.agents"),
-            "charts": t("routing.charts"),
-        }
-        for name in self._tab_names.values():
-            self.tabs.add(name)
-
-        compliance_tab = ctk.CTkScrollableFrame(
-            self.tabs.tab(self._tab_names["compliance"]), fg_color="transparent"
-        )
-        compliance_tab.pack(fill="both", expand=True)
-        # Ce qui sera rendu à l'utilisateur n'est pas le meilleur score, c'est
-        # la meilleure trajectoire admissible — et quand il n'y en a aucune, il
-        # faut le lire, pas le deviner d'un badge rouge.
-        self.lbl_valid = ctk.CTkLabel(
-            compliance_tab, text="", font=FONT.SMALL_BOLD,
-            text_color=theme.TEXT_SOFT, anchor="w", justify="left", wraplength=760,
-        )
-        self.lbl_valid.pack(fill="x", pady=(0, SPACE.SM))
-
-        self.compliance = ComplianceTable(compliance_tab, lang=self.app.t.lang)
-        self.compliance.set_placeholder(t("report.verdict.none"))
-        self.compliance.pack(fill="both", expand=True)
-
-        advice_tab = ctk.CTkScrollableFrame(
-            self.tabs.tab(self._tab_names["advice"]), fg_color="transparent"
-        )
-        advice_tab.pack(fill="both", expand=True)
-        self.advice_board = AdviceBoard(
-            advice_tab, lang=self.app.t.lang, on_apply=self._on_apply_advice
-        )
-        self.advice_board.pack(fill="both", expand=True)
-
-        agents_tab = ctk.CTkScrollableFrame(
-            self.tabs.tab(self._tab_names["agents"]), fg_color="transparent"
-        )
-        agents_tab.pack(fill="both", expand=True)
-        self.agent_board = AgentBoard(agents_tab)
-        self.agent_board.pack(fill="both", expand=True)
-
-        self.charts_container = ctk.CTkFrame(
-            self.tabs.tab(self._tab_names["charts"]), fg_color="transparent"
-        )
+        self.charts_container = ctk.CTkFrame(charts_card.body, fg_color="transparent")
         self.charts_container.pack(fill="both", expand=True)
 
-        # Les courbes s'affichent d'emblée : c'est ce qu'on regarde pendant que
-        # le calcul tourne. La conformité, elle, se lit à la fin.
-        self.tabs.set(self._tab_names["charts"])
         self._charts_full = False
         self._scan_visible = False
 
@@ -564,16 +512,6 @@ class RoutingPage(ctk.CTkFrame):
             {key: bool(box.get()) for key, box in self.view_toggles.items()}
         )
 
-    def _on_apply_advice(self, suggestion):
-        """Applique un conseil au réglage correspondant, à l'étape « Règles ».
-
-        Le changement n'est pas appliqué à chaud : les agents ont recopié les
-        règles au démarrage, et n'en modifier qu'une partie en cours de route
-        produirait un mélange incohérent entre la récompense et le rapport. On
-        écrit donc dans la page « Règles » et on invite à relancer.
-        """
-        self.app.controller.apply_suggestion(suggestion)
-
     def _on_detach(self):
         self.app.controller.detach_3d()
 
@@ -606,7 +544,7 @@ class RoutingPage(ctk.CTkFrame):
     def _toggle_charts_full(self):
         """Donne toute la colonne droite aux courbes, ou la rend aux bandeaux."""
         self._charts_full = not self._charts_full
-        for widget in (self.card_progress, self.scan_box, self.view_state):
+        for widget in (self.card_progress, self.scan_box, self.viewer_container):
             if self._charts_full:
                 widget.grid_remove()
             elif widget is not self.scan_box or self._scan_visible:
@@ -615,7 +553,6 @@ class RoutingPage(ctk.CTkFrame):
             text=self.t("routing.charts.shrink") if self._charts_full
             else self.t("routing.charts.expand")
         )
-        self.tabs.set(self._tab_names["charts"])
 
     def _toggle_advanced(self):
         self._advanced_open = not self._advanced_open
@@ -684,20 +621,14 @@ class RoutingPage(ctk.CTkFrame):
             self.pill.update_status(t("app.ready"), "neutral")
 
     def update_live(self, snapshot: dict):
-        """Rafraîchit les indicateurs, la conformité et les agents."""
+        """Rafraîchit les indicateurs d'avancement.
+
+        La conformité et les conseils ne sont plus affichés ici : pendant un
+        calcul, la page ne montre que l'avancement et les courbes.
+        """
         theme = current()
 
         report = snapshot.get("report")
-        self.compliance.update_report(report)
-
-        valid = snapshot.get("valid")
-        if valid is not None:
-            self.lbl_valid.configure(
-                text=("🔒  " if snapshot.get("has_valid") else "⚠️  ") + valid,
-                text_color=theme.ok if snapshot.get("has_valid") else theme.warn,
-            )
-        self.advice_board.update_advice(snapshot.get("advice"))
-        self._refresh_advice_tab()
 
         if report is not None:
             k = report.kpis
@@ -723,7 +654,6 @@ class RoutingPage(ctk.CTkFrame):
                 key: Phase.label(key, self.app.t.lang) for key in PhaseIndicator.ORDER
             }
             self.phase_indicator.update_phase(team.get("phase", ""), labels)
-            self.agent_board.update_agents(snapshot.get("agents", []))
 
         info = []
         if snapshot.get("iteration") is not None:
@@ -795,23 +725,6 @@ class RoutingPage(ctk.CTkFrame):
         self.f_use_fixations.var.set(bool(value))
         self.app.remember(use_fixations=bool(value))
 
-    def _refresh_advice_tab(self):
-        """Affiche le nombre de conseils sur l'onglet.
-
-        Sans cela, un conseil déposé dans un onglet non affiché n'est jamais vu.
-        """
-        count = self.advice_board.count()
-        label = self.t("routing.advice")
-        wanted = f"{label} ({count})" if count else label
-        current_name = self._tab_names["advice"]
-        if wanted == current_name:
-            return
-        try:
-            self.tabs.rename(current_name, wanted)
-        except Exception:
-            return
-        self._tab_names["advice"] = wanted
-
     def set_detached(self, detached: bool):
         """Le bouton dit ce qu'il fera, pas l'état où l'on se trouve."""
         self.btn_detach.configure(
@@ -849,6 +762,14 @@ class RoutingPage(ctk.CTkFrame):
         )
         self.lbl_phase_caption.configure(text=t("routing.phase"))
         self.lbl_view.configure(text=t("routing.view"))
+        self.charts_card.set_title(t("routing.charts"), "📈")
+        self.btn_charts_full.configure(
+            text=t("routing.charts.shrink") if self._charts_full
+            else t("routing.charts.expand")
+        )
+        self.btn_charts_window.configure(text=t("routing.charts.window"))
+        self.chk_edit.configure(text=t("routing.view.edit"))
+        self.btn_release.configure(text=t("routing.view.edit.clear"))
         for key, label_key in (
             ("mesh", "routing.view.mesh"), ("edges", "routing.view.edges"),
             ("bbox", "routing.view.bbox"), ("clamps", "routing.view.clamps"),
@@ -861,7 +782,4 @@ class RoutingPage(ctk.CTkFrame):
                 "clamps": t("kpi.clamps"),
             }
         )
-        self.compliance.set_language(self.app.t.lang)
-        self.compliance.set_placeholder(t("report.verdict.none"))
-        self.advice_board.update_language(self.app.t.lang)
         self._on_team_changed(self.f_team.get())

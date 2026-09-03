@@ -41,7 +41,7 @@ Un assistant en quatre étapes, qui se déverrouillent au fur et à mesure.
 |---|---|
 | **1. Projet** | Désigner le dossier de STL (ou lancer l'export CATIA), assembler la maquette, voir la répartition des pièces par famille. |
 | **2. Règles** | Cocher les règles à appliquer, puis régler diamètre du toron, rayon de cintrage, distances mini/maxi, distances renforcées par famille, pas entre fixations. |
-| **3. Cheminement** | Poser départ et arrivée, choisir une équipe d'agents et le réglage exploration/exploitation, lancer, suivre en direct (conformité, conseils, agents, courbes). |
+| **3. Cheminement** | Poser départ et arrivée, choisir une équipe d'agents et le réglage exploration/exploitation, lancer, suivre en direct sur les courbes de progression. |
 | **4. Rapport** | Lire le verdict règle par règle, exporter en STL, CSV ou JSON, réinsérer le faisceau dans le document CATIA ouvert. |
 
 Tout est exprimé en unités physiques et en vocabulaire métier. Les
@@ -347,8 +347,8 @@ une image incrustée dans la page *Cheminement*, produite par capture d'écran
 d'un plotter hors écran, et une fenêtre détachée optionnelle. L'incrustée
 coûtait cher pour ce qu'elle montrait — une image figée, une émulation maison
 de l'orbite, du panoramique et du zoom, et un pipeline de capture qui se
-dispute le pilote graphique avec la fenêtre. Elle est supprimée ; la page ne
-garde qu'un bandeau d'état, et toute la hauteur gagnée revient aux onglets.
+dispute le pilote graphique avec la fenêtre. Elle est supprimée, et toute la
+hauteur gagnée revient aux courbes.
 
 Le point important reste architectural. **Tout ce qui touche à VTK vit dans un
 fil de rendu dédié**, qui possède le plotter, reçoit des ordres par une file et
@@ -363,6 +363,48 @@ acteurs VTK. C'est ce qui permet de fermer la fenêtre, de la rouvrir, et d'y
 retrouver la scène intacte, sans jamais partager d'objet VTK entre deux fils.
 Les ordres d'affichage sont donc acceptés même fenêtre fermée : le contrôleur
 n'a pas à savoir si quelqu'un regarde.
+
+### Ce que la fenêtre affiche par-dessus la scène
+
+Trois surimpressions se posent sur la fenêtre sans faire partie de la scène.
+Elles vivent donc hors de VTK, comme les recettes, et une fenêtre refermée puis
+rouverte les retrouve.
+
+**Le tableau des métriques**, en haut à droite. Les courbes disent la tendance,
+pas la valeur : on y lit qu'un rayon de cintrage monte, pas qu'il vaut 118 mm
+pour une limite à 120. Le tableau donne les trois nombres qui manquent — le
+minimum et le maximum rencontrés depuis le début, et la valeur courante — pour
+sept grandeurs : récompense, interférences, distance moyenne et minimale,
+rayon de cintrage, longueur, rectitude.
+
+L'étendue est suivie **par agent**, et le tableau nomme celui qu'il décrit :
+mélanger l'historique de cinq agents y afficherait un minimum que l'agent
+affiché n'a jamais atteint. La police est à chasse fixe — sans elle les
+colonnes se décalent d'une ligne à l'autre et le tableau devient illisible.
+
+**La légende**, en haut à gauche : une ligne par agent, écrite dans la couleur
+de sa trajectoire, dans l'ordre du classement, celle du meilleur portant la
+mention. Le bas gauche appartient au trièdre : une légende posée là se lit
+par-dessus les axes. Elle s'ancre donc depuis le haut, en relisant la hauteur
+de la fenêtre à chaque pose, ce qui rattrape un redimensionnement au
+rafraîchissement suivant.
+
+**La case « meilleur agent seulement »**, en bas à gauche, sous le trièdre.
+Elle masque toutes les trajectoires sauf celle du meilleur. La placer dans la
+page derrière la 3D aurait obligé à quitter des yeux ce qu'on regarde pour
+changer ce qu'on regarde. Le filtre porte sur la **visibilité**, pas sur la
+scène : les trajectoires masquées restent à jour et reparaissent
+instantanément, sans reconstruire cinq tubes. Il se réapplique à chaque ajout
+d'acteur — un acteur réajouté est visible d'office, et le contrôleur redessine
+chaque trajectoire qui bouge : sans ce rappel, un agent masqué reparaîtrait à
+son itération suivante.
+
+Un détail qui se paie cher si on l'ignore : **la police vectorielle de VTK
+couvre le latin-1 et rien de plus**. Les accents passent — vérifié en comptant
+les pixels d'encre de « Récompense » contre ceux de « Recompense » — mais ★, ▶,
+→ et ∞ ne laissent aucun pixel. La mention du meilleur agent est donc écrite en
+toutes lettres, et le rayon d'un tronçon droit est plafonné plutôt qu'affiché
+comme infini.
 
 ### Fermer la fenêtre sans noyer la console
 
@@ -438,7 +480,20 @@ d'expert, pas un garde-fou.
 
 ## Suivre et débloquer une session
 
-### Les courbes
+### Les courbes, et rien d'autre
+
+La page *Cheminement* ne porte plus, sous l'avancement, que les courbes.
+Conformité du meilleur tracé, conseils et tableau des agents y occupaient trois
+onglets sur quatre : pendant un calcul on ne les lit pas, et on les recalculait
+quatre fois par seconde pour remplir des onglets que personne ne regardait. La
+conformité se lit à la fin, sur la page *Résultats*, qui porte sa propre table ;
+le détail de chaque agent se lit dans la légende de la fenêtre 3D, à côté de sa
+trajectoire.
+
+Le bandeau encadré qui annonçait l'état de la vue 3D a disparu avec eux : il
+réclamait 216 pixels pour une ligne de texte que la barre d'état affiche déjà.
+Il n'en reste qu'un conteneur qui se réduit à rien tant qu'il est vide, et ne
+s'ouvre que pour dire, le cas échéant, que la 3D est indisponible sur ce poste.
 
 Quatre courbes, une par agent, avec la couleur de sa trajectoire dans la vue 3D :
 la **récompense** — ce que l'agent maximise réellement, seule à dire si
@@ -474,10 +529,17 @@ seraient pires qu'un seul trop petit.
 
 ### Les conseils
 
+> **Aucun écran ne les affiche depuis que la page *Cheminement* ne porte que
+> les courbes.** Le moteur (`core/diagnostics.py`), le bandeau `AdviceBoard` et
+> `apply_suggestion`, son pendant qui écrit le réglage, restent en place et
+> testés : c'est le chemin de retour si les conseils doivent reparaître — sur
+> la page *Résultats*, par exemple, qui est le moment où on les lirait. Ce qui
+> suit décrit ce que le moteur sait faire, pas ce qui s'affiche aujourd'hui.
+
 Un agent qui n'arrive pas à respecter une règle ne le dit pas : il continue,
-et rien ne distingue « c'est long » de « c'est impossible ». L'onglet
-**Conseils** fait la différence, et la formule en termes actionnables — valeur
-mesurée, valeur proposée, réglage exact, bouton pour l'appliquer.
+et rien ne distingue « c'est long » de « c'est impossible ». Le diagnostic fait
+la différence, et la formule en termes actionnables — valeur mesurée, valeur
+proposée, réglage exact, bouton pour l'appliquer.
 
 Trois garde-fous le gouvernent :
 
@@ -1040,7 +1102,7 @@ ui/
   widgets/  pages/          composants et écrans
 tools/
   sweep.py                  balayage de réglages sur *votre* DMU, sans interface
-tests/                      567 tests hors interface, 158 tests d'interface
+tests/                      567 tests hors interface, 194 tests d'interface
 ```
 
 `core/geometry_metrics.py`, `core/routing_rules.py`, `core/reward_terms.py` et

@@ -76,6 +76,23 @@ VALID_ROUTE = "__valid__"
 
 #: Cadence de rafraîchissement de l'interface pendant le calcul, en ms.
 REFRESH_RUNNING_MS = 250
+
+#: Métriques reprises en surimpression dans la fenêtre 3D : clé interne,
+#: libellé FR, libellé EN, nombre de décimales. L'ordre est celui de lecture —
+#: ce qui interdit une route d'abord, ce qui la qualifie ensuite.
+OVERLAY_METRICS = (
+    ("reward", "Récompense", "Reward", 1),
+    ("n_clashes", "Interférences", "Interferences", 0),
+    ("mean_distance_mm", "Distance moy.", "Mean distance", 1),
+    ("min_distance_mm", "Distance min.", "Min distance", 1),
+    ("min_bend_radius_mm", "Cintrage", "Bend radius", 1),
+    ("length_mm", "Longueur", "Length", 0),
+    ("straight_pct", "Rectitude %", "Straightness %", 0),
+)
+
+#: Rayon au-delà duquel un tronçon est droit. Un segment parfaitement droit a
+#: un rayon infini, que ni une colonne ni un extremum ne savent afficher.
+OVERLAY_BEND_CAP_MM = 5000.0
 REFRESH_IDLE_MS = 700
 
 
@@ -107,6 +124,9 @@ class AppController:
         self._detached = False
         #: Dernier état dessiné par agent, pour ne pas redessiner l'identique.
         self._path_signatures: dict[str, tuple] = {}
+        #: Étendue [min, max] de chaque métrique, par agent, depuis le début de
+        #: la session. Alimente le tableau de la fenêtre 3D.
+        self._metric_spans: dict[str, dict[str, list]] = {}
         #: Dernier jeu de crabes dessiné, pour ne pas redessiner l'identique.
         self._clamp_signature: tuple = ()
         #: Modèle STL du crabe, pour le dessiner tel qu'il est réellement posé.
@@ -917,12 +937,19 @@ class AppController:
         self.benchmark_algos = {}
         self.shared_state = None
         self._path_signatures.clear()
+        self._metric_spans.clear()
         self._best_scores.clear()
         self.best_valid = None
         self._clamp_signature = ()
         if self.viewer is not None:
             self.viewer.remove_prefix("traj_")
             self.viewer.remove_prefix("clamp_")
+            # Le tableau et la légende décrivaient la session qu'on remet à
+            # zéro : les laisser afficherait des extrema qu'aucun agent
+            # n'atteindra plus.
+            self.viewer.set_metrics("")
+            self.viewer.set_legend([])
+            self.viewer.set_best_agent(None)
             self.viewer.render()
 
         if self.charts is not None:
@@ -930,7 +957,7 @@ class AppController:
 
         self.view.pages[2].set_running_state("idle")
         self.view.pages[2].update_live(
-            {"report": None, "team": {}, "agents": [], "advice": []}
+            {"report": None, "team": {}}
         )
         self.view.set_status(self.t("app.ready"), "neutral")
 
@@ -975,6 +1002,7 @@ class AppController:
                 t=lambda key, default="": self.t(key) or default,
             )
             self.viewer.set_on_handle_move(self._on_handle_moved)
+            self.viewer.set_on_best_only(self._on_best_only_toggled)
             self.viewer.start()
 
         if self.viewer.mode == MODE_UNAVAILABLE:
@@ -1180,6 +1208,18 @@ class AppController:
             return pv.PolyData(np.asarray(vertices, dtype=float), padded.ravel())
         except Exception:
             return None
+
+    def _on_best_only_toggled(self, best_only: bool):
+        """La case de la fenêtre 3D a changé : le dire dans la barre d'état.
+
+        Le filtre est piloté depuis la fenêtre 3D, où l'utilisateur regarde.
+        La page, elle, doit pouvoir dire ce qui est affiché : une trajectoire
+        manquante sans explication se lit comme un agent qui a disparu.
+        """
+        self.view.set_status(
+            self.t("routing.view.best.on" if best_only else "routing.view.best.off"),
+            "info",
+        )
 
     def _on_viewer_status(self, mode: str, error: str | None):
         from ui.viewer3d import (
@@ -1465,16 +1505,124 @@ class AppController:
                 for name, state in self.shared_state.get("algos", {}).items()
             }
 
+        # Les couleurs se calculent avant toute condition : construites dans
+        # la branche des courbes, elles n'existaient pas quand la fenêtre
+        # détachée était ouverte sans que les courbes de la page le soient.
+        colors = {n: e.get("color", "#2D7FF9") for n, e in self.benchmark_algos.items()}
+
         self._draw_paths(snapshot)
         self._update_page(snapshot, team)
+        self._update_overlays(snapshot, team, colors)
         if self.charts is not None and playing:
-            colors = {n: e.get("color", "#2D7FF9") for n, e in self.benchmark_algos.items()}
             self.charts.update(snapshot, colors)
         if self.charts_window is not None:
             self.charts_window.update_charts(snapshot, colors)
 
         delay = REFRESH_RUNNING_MS if playing else REFRESH_IDLE_MS
         self._refresh_job = self.view.after(delay, self._refresh)
+
+    # ------------------------------------------------------------------
+    # Surimpressions de la fenêtre 3D
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _metric_values(state: dict) -> dict:
+        """Les métriques d'un agent, ramenées à des nombres comparables."""
+        report = state.get("report")
+        if report is None:
+            return {}
+        k = report.kpis
+        radius = k.get("min_bend_radius_mm", float("inf"))
+        return {
+            "reward": float(state.get("reward", 0.0)),
+            "n_clashes": float(k.get("n_clashes", 0)),
+            "mean_distance_mm": float(k.get("mean_distance_mm", 0.0)),
+            "min_distance_mm": float(k.get("min_distance_mm", 0.0)),
+            # Un tronçon droit a un rayon infini : plafonné, il reste
+            # comparable sans écraser la colonne.
+            "min_bend_radius_mm": min(float(radius), OVERLAY_BEND_CAP_MM),
+            "length_mm": float(k.get("length_mm", 0.0)),
+            "straight_pct": float(k.get("straight_ratio", 0.0)) * 100.0,
+        }
+
+    def _track_spans(self, snapshot: dict):
+        """Retient, par agent, l'étendue parcourue par chaque métrique.
+
+        L'étendue est suivie **par agent** et non globalement : le tableau
+        nomme l'agent qu'il décrit, et mélanger l'historique de cinq agents y
+        afficherait un minimum que celui affiché n'a jamais atteint.
+        """
+        for name, state in (snapshot or {}).items():
+            values = self._metric_values(state)
+            if not values:
+                continue
+            spans = self._metric_spans.setdefault(name, {})
+            for key, value in values.items():
+                span = spans.get(key)
+                if span is None:
+                    spans[key] = [value, value]
+                else:
+                    span[0] = min(span[0], value)
+                    span[1] = max(span[1], value)
+
+    def _metrics_table(self, name: str, state: dict) -> str:
+        """Tableau min / max / actuel, en colonnes à chasse fixe."""
+        values = self._metric_values(state)
+        if not values:
+            return ""
+        english = self.view.t.is_english
+        spans = self._metric_spans.get(name, {})
+
+        entete = (f"{name}  ·  "
+                  + (f"iteration {state.get('iteration', 0)}" if english
+                     else f"itération {state.get('iteration', 0)}"))
+        colonnes = (f"{'metric' if english else 'métrique':<15}"
+                    f"{'min':>9}{'max':>9}{'now' if english else 'actuel':>9}")
+        lignes = [entete, colonnes, "-" * len(colonnes)]
+
+        for key, label_fr, label_en, decimals in OVERLAY_METRICS:
+            if key not in values:
+                continue
+            bas, haut = spans.get(key, (values[key], values[key]))
+            label = label_en if english else label_fr
+            lignes.append(
+                f"{label:<15}{bas:>9.{decimals}f}{haut:>9.{decimals}f}"
+                f"{values[key]:>9.{decimals}f}"
+            )
+        return "\n".join(lignes)
+
+    def _update_overlays(self, snapshot: dict, team: dict, colors: dict):
+        """Alimente le tableau, la légende et le filtre de la fenêtre 3D.
+
+        Les courbes disent la tendance, le tableau donne les nombres, la
+        légende dit à qui appartient chaque couleur. Aucune des trois ne
+        remplace les deux autres.
+        """
+        if self.viewer is None or not self.viewer.is_available:
+            return
+
+        self._track_spans(snapshot)
+
+        ranking = team.get("ranking") or list(snapshot)
+        best = ranking[0] if ranking else None
+        self.viewer.set_best_agent(best)
+
+        lang = self.view.t.lang
+        legend = []
+        for rank, name in enumerate(ranking, start=1):
+            spec = self.benchmark_algos.get(name, {}).get("spec")
+            role = ROLES.get(getattr(spec, "role", ""), None)
+            # La police vectorielle de VTK couvre le latin-1 et rien de plus :
+            # ★, ▶ et → n'y laissent aucun pixel. On écrit donc le mot.
+            marque = ("  (best)" if self.view.t.is_english else "  (meilleur)") \
+                if name == best else ""
+            libelle = role.label(lang) if role else name
+            legend.append((f"{rank}. {name} — {libelle}{marque}",
+                           colors.get(name, "#2D7FF9")))
+        self.viewer.set_legend(legend)
+
+        if best is not None:
+            self.viewer.set_metrics(self._metrics_table(best, snapshot.get(best, {})))
 
     def _draw_paths(self, snapshot: dict):
         """Redessine les trajectoires qui ont bougé, et elles seules.
@@ -1514,61 +1662,20 @@ class AppController:
 
         ranking = team.get("ranking") or list(snapshot)
         best = ranking[0] if ranking else None
-
-        # Conseils : tirés du meilleur agent, et seulement de lui. Moyenner les
-        # rapports de cinq agents produirait un diagnostic qui ne correspond à
-        # aucune route réellement obtenue.
         best_state = snapshot.get(best, {}) if best else {}
-        advice = self._advise(best_state)
         self._draw_clamps(best_state.get("crabes") or [])
-        lang = self.view.t.lang
 
-        agents = []
-        for name in ranking:
-            state = snapshot.get(name, {})
-            spec = self.benchmark_algos.get(name, {}).get("spec")
-            role = ROLES.get(getattr(spec, "role", ""), None)
-            report = state.get("report")
-
-            if report is None:
-                detail = "Démarrage…"
-                badge, badge_color = "", None
-            else:
-                k = report.kpis
-                radius = k.get("min_bend_radius_mm", float("inf"))
-                detail = (
-                    f"{k.get('n_clashes', 0)} interférence(s) · "
-                    f"{'∞' if radius == float('inf') else f'{radius:.0f} mm'} de cintrage · "
-                    f"{k.get('straight_ratio', 0) * 100:.0f} % droit"
-                )
-                badge = "conforme" if report.is_compliant else ""
-                badge_color = None
-
-            migrations = state.get("migrations", 0)
-            if migrations:
-                detail += f" · {migrations} reprise(s)"
-
-            agents.append(
-                {
-                    "name": name,
-                    "label": role.label(lang) if role else name,
-                    "color": self.benchmark_algos.get(name, {}).get("color", "#2D7FF9"),
-                    "rank": ranking.index(name) + 1,
-                    "state": detail,
-                    "badge": badge,
-                    "badge_color": badge_color,
-                }
-            )
-
+        # La page de cheminement ne porte plus que l'avancement et les courbes.
+        # Conseils, conformité et détail par agent en ont été retirés : on les
+        # calculait à chaque rafraîchissement — quatre fois par seconde — pour
+        # remplir des onglets que personne ne regarde pendant un calcul. La
+        # conformité se lit à la fin sur la page Résultats, le détail de chaque
+        # agent dans la légende de la fenêtre 3D.
         self.view.pages[2].update_live(
             {
                 "report": best_state.get("report"),
-                "valid": self._valid_summary(),
-                "has_valid": self.best_valid is not None,
                 "iteration": best_state.get("iteration"),
                 "team": team,
-                "agents": agents,
-                "advice": advice,
             }
         )
 
@@ -1646,6 +1753,11 @@ class AppController:
         return self.best_valid
 
     def _advise(self, best_state: dict) -> list:
+        # NOTE : plus aucun écran n'affiche ces conseils depuis que la page de
+        # cheminement ne porte que les courbes. Le moteur de diagnostic et
+        # apply_suggestion, son pendant, restent en place et testés : c'est le
+        # chemin de retour si les conseils doivent reparaître, sur la page
+        # Résultats par exemple. Rien ne l'appelle aujourd'hui.
         """Conseils sur l'état du meilleur agent, ou liste vide s'il est trop tôt.
 
         L'historique des scores sert à repérer la stagnation : conseiller de
