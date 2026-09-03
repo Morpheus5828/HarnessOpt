@@ -220,9 +220,19 @@ FR: dict[str, str] = {
     "advice.applied": "Réglage appliqué à l'étape « Règles ». Relancez le cheminement pour qu'il prenne effet.",
     "advice.not_settable": "Ce conseil ne correspond à aucun réglage : suivez l'indication donnée.",
     "routing.charts": "Progression",
+    "routing.charts.window": "Courbes en plein écran",
+    "routing.charts.window.close": "Fermer les courbes",
+    "routing.charts.window.none": "Fenêtre des courbes indisponible :",
     "routing.charts.expand": "Agrandir les courbes",
     "routing.charts.shrink": "Réduire les courbes",
     "routing.advanced": "Réglages avancés",
+    "routing.calibrate": "Calibrer pour ce faisceau",
+    "routing.calibrate.help": (
+        "Redéduit le nombre de points, le plafond et le pas de la longueur du "
+        "faisceau et du rayon de cintrage du toron."
+    ),
+    "routing.calibrate.done": "Calibré : {points} points, un tous les {spacing:.0f} mm.",
+    "routing.calibrate.none": "Renseignez d'abord le départ et l'arrivée.",
     "routing.advanced.warn": (
         "Ces réglages n'ont normalement pas besoin d'être touchés : "
         "la façon de travailler choisie plus haut les ajuste déjà."
@@ -463,9 +473,19 @@ EN: dict[str, str] = {
     "advice.applied": "Setting applied in the Rules step. Restart the routing for it to take effect.",
     "advice.not_settable": "This advice maps to no setting: follow the indication given.",
     "routing.charts": "Progress",
+    "routing.charts.window": "Charts full screen",
+    "routing.charts.window.close": "Close charts",
+    "routing.charts.window.none": "Charts window unavailable:",
     "routing.charts.expand": "Enlarge charts",
     "routing.charts.shrink": "Shrink charts",
     "routing.advanced": "Advanced settings",
+    "routing.calibrate": "Calibrate for this harness",
+    "routing.calibrate.help": (
+        "Re-derives the point count, the ceiling and the step from the harness "
+        "length and the bundle bend radius."
+    ),
+    "routing.calibrate.done": "Calibrated: {points} points, one every {spacing:.0f} mm.",
+    "routing.calibrate.none": "Set the start and end points first.",
     "routing.advanced.warn": (
         "These settings normally need no adjustment: the way of working chosen above "
         "already tunes them."

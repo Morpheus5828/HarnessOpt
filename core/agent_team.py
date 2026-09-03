@@ -20,7 +20,6 @@ chaque agent lit à son rythme. Aucune synchronisation lourde n'est nécessaire.
 from __future__ import annotations
 
 import threading
-import time
 
 from core.agent.agent import RecurrentTD3Agent, RLAgent, SACAgent
 from core.agent.buffer import ReplayBuffer, SequenceReplayBuffer

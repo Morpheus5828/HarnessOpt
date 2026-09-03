@@ -40,6 +40,17 @@ def charts():
     return ProgressCharts(container=None)
 
 
+@pytest.fixture(scope="module")
+def root():
+    ctk = pytest.importorskip("customtkinter")
+    try:
+        window = ctk.CTk()
+    except Exception as exc:  # pas d'affichage disponible
+        pytest.skip(f"aucun serveur graphique disponible : {exc}")
+    yield window
+    window.destroy()
+
+
 # ----------------------------------------------------------------------
 # La récompense fait partie des courbes
 # ----------------------------------------------------------------------
@@ -172,3 +183,106 @@ def test_un_rapport_absent_n_est_pas_enregistre(charts):
     charts._redraw = lambda _colors: None
     charts.update({"scout": {"iteration": 3, "reward": 1.0, "report": None}}, {})
     assert "scout" not in charts._history
+
+
+# ----------------------------------------------------------------------
+# Les courbes en plein écran
+# ----------------------------------------------------------------------
+
+class TestFenetreDesCourbes:
+    """Quatre séries dans un quart d'écran ne se suivent pas."""
+
+    @pytest.fixture
+    def fenetre(self, root):
+        from ui.charts_window import ChartsWindow
+
+        window = ChartsWindow(root, lang="FR")
+        yield window
+        window.close()
+
+    def test_la_fenetre_porte_les_memes_courbes(self, fenetre):
+        """Deux jeux de courbes qui divergeraient seraient pires qu'un seul."""
+        from ui.charts import ProgressCharts
+
+        assert isinstance(fenetre.charts, ProgressCharts)
+
+    # Sous Xvfb il n'y a pas de gestionnaire de fenêtres : l'attribut
+    # ``-fullscreen`` est bien posé, mais il se relit toujours à 1, et une
+    # touche envoyée à la fenêtre n'y arrive que si elle a le focus — ce qui
+    # dépend des autres fenêtres ouvertes par la suite de tests. On vérifie
+    # donc le contrat de la fenêtre, pas l'acheminement des touches par Tk.
+
+    def test_elle_s_ouvre_en_plein_ecran(self, fenetre, root):
+        """C'est ce qu'on est venu chercher en ouvrant cette fenêtre."""
+        root.update()
+        assert fenetre.fullscreen is True
+
+    def test_il_existe_une_porte_de_sortie(self, fenetre):
+        """Une fenêtre plein écran sans porte de sortie visible est un piège."""
+        assert fenetre.bind("<Escape>"), "aucune liaison Échap"
+        assert fenetre.bind("<F11>"), "aucune liaison F11"
+        assert fenetre.btn_fullscreen.cget("command") is not None
+
+    def test_la_bascule_fait_l_aller_retour(self, fenetre, root):
+        fenetre._set_fullscreen(False)
+        root.update()
+        assert fenetre.fullscreen is False
+        fenetre._set_fullscreen(True)
+        root.update()
+        assert fenetre.fullscreen is True
+
+    def test_un_gestionnaire_qui_refuse_le_plein_ecran_ne_ment_pas(self, fenetre):
+        """Le bouton doit dire l'état réel, pas celui qu'on a demandé."""
+        def refuse(*_args, **_kwargs):
+            raise RuntimeError("plein écran refusé")
+
+        fenetre.attributes = refuse
+        fenetre._set_fullscreen(True)
+        assert fenetre.fullscreen is False
+
+    def test_le_bouton_dit_dans_quel_sens_il_bascule(self, fenetre, root):
+        root.update()
+        plein = fenetre.btn_fullscreen.cget("text")
+        fenetre._set_fullscreen(False)
+        root.update()
+        assert fenetre.btn_fullscreen.cget("text") != plein
+
+    def test_hors_plein_ecran_la_fenetre_laisse_voir_la_3d(self, fenetre, root):
+        """Sortir du plein écran doit redécouvrir la vue 3D, pas la masquer."""
+        from ui.charts_window import SCREEN_FRACTION
+
+        assert 0.0 < SCREEN_FRACTION < 1.0
+
+    def test_elle_compte_les_agents_et_les_iterations(self, fenetre, root):
+        """Le bandeau doit dire où en est la session, pas rester vide."""
+        snapshot = {
+            "TD3": {"iteration": 37, "reward": 1.0, "report": None},
+            "SAC": {"iteration": 31, "reward": 2.0, "report": None},
+        }
+        fenetre.update_charts(snapshot, {"TD3": "#2D7FF9", "SAC": "#E08A00"})
+        root.update()
+        texte = fenetre.lbl_state.cget("text")
+        assert "2 agent" in texte
+        assert "37" in texte, "on affiche l'itération la plus avancée"
+
+    def test_un_instantane_apres_fermeture_ne_leve_pas(self, root):
+        """La fenêtre peut disparaître entre deux rafraîchissements."""
+        from ui.charts_window import ChartsWindow
+
+        window = ChartsWindow(root, lang="FR")
+        window.close()
+        window.update_charts({"TD3": {"iteration": 1}}, {})   # ne doit pas lever
+
+    def test_la_fermeture_previent_l_appelant(self, root):
+        from ui.charts_window import ChartsWindow
+
+        vus = []
+        window = ChartsWindow(root, lang="FR", on_close=lambda: vus.append(1))
+        window.close()
+        assert vus == [1]
+
+    def test_les_libelles_sont_bilingues(self):
+        from ui.i18n import EN, FR
+
+        for cle in ("routing.charts.window", "routing.charts.window.close"):
+            assert FR[cle].strip() and EN[cle].strip()

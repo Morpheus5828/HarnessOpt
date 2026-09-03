@@ -8,7 +8,6 @@ recherche.
 """
 
 import numpy as np
-import pytest
 
 from controller.app_controller import VALID_ROUTE, AppController
 from core.routing_rules import RULE_IDS, RoutingRules, evaluate_route

@@ -262,3 +262,115 @@ def test_le_decalage_marche_sur_des_pieces_disjointes(deux_pieces):
                          num_points=60, offset_mm=15.0)
     assert trace.success
     assert trace.min_clearance_mm > 14.0
+
+
+# ----------------------------------------------------------------------
+# Le tracé ne revient jamais sur ses pas
+# ----------------------------------------------------------------------
+
+def inversions(points):
+    """Raccords où le tracé repart d'où il venait."""
+    seg = np.diff(np.asarray(points, dtype=float), axis=0)
+    norms = np.linalg.norm(seg, axis=1, keepdims=True)
+    unit = seg / np.where(norms > 1e-9, norms, 1.0)
+    cos = np.einsum("ij,ij->i", unit[:-1], unit[1:])
+    return int(np.count_nonzero(cos < 0.0))
+
+
+@pytest.fixture(scope="module")
+def dmu_fusionne():
+    """Cadres et planchers séparés : le cas où le décalage plie le tracé."""
+    parts = []
+    for i in range(4):
+        cadre = trimesh.creation.box(extents=[40, 800, 600])
+        cadre.apply_translation([250 + i * 400, 400, 300])
+        parts.append(cadre)
+        plancher = trimesh.creation.box(extents=[240, 800, 30])
+        plancher.apply_translation([250 + i * 400, 400, 15])
+        parts.append(plancher)
+    mesh = trimesh.util.concatenate(parts)
+    mesh.merge_vertices()
+    return mesh
+
+
+def test_le_decalage_seul_replie_le_trace(dmu_fusionne):
+    """Le défaut : deux voisins poussés sur des faces opposées se croisent."""
+    from core.surface_path import offset_from_surface
+
+    brut = surface_path(dmu_fusionne, (120.0, 400.0, 250.0), (1700.0, 400.0, 250.0),
+                        num_points=60)
+    assert inversions(brut.points) == 0, "le tracé sur la surface, lui, est simple"
+
+    plie, _ = offset_from_surface(dmu_fusionne, np.asarray(brut.points, dtype=float), 60.0)
+    assert inversions(plie) > 0, "c'est bien le décalage qui replie"
+
+
+SOURCE = (120.0, 400.0, 250.0)
+CIBLE = (1700.0, 400.0, 250.0)
+
+
+def progression(points, source=SOURCE, cible=CIBLE):
+    """Avancée de chaque point sur la corde source-cible, en mm."""
+    pts = np.asarray(points, dtype=np.float64)
+    a = np.asarray(source, dtype=np.float64)
+    axe = np.asarray(cible, dtype=np.float64) - a
+    return (pts - a) @ (axe / np.linalg.norm(axe))
+
+
+# Zéro compris : c'est la géodésique brute, celle qui reculait.
+@pytest.mark.parametrize("ecart", [0.0, 25.0, 60.0, 100.0])
+def test_le_trace_rendu_ne_recule_jamais(dmu_fusionne, ecart):
+    """Il ne fait qu'avancer de la source vers la cible.
+
+    Un demi-tour et un recul sont deux défauts distincts : on vérifie les deux.
+    Le second ne se déduit pas du premier — un tracé peut revenir vers sa
+    source sans qu'aucun de ses raccords ne se referme.
+    """
+    result = surface_path(dmu_fusionne, SOURCE, CIBLE, num_points=60, offset_mm=ecart)
+    assert result.success
+    assert inversions(result.points) == 0
+    assert result.n_folds == 0
+    assert (np.diff(progression(result.points)) >= -1e-6).all()
+
+
+def test_le_compteur_de_replis_est_rempli_meme_sans_decalage(dmu_fusionne):
+    """Un compteur qui ne se remplit que parfois annonce zéro à tort."""
+    result = surface_path(dmu_fusionne, SOURCE, CIBLE, num_points=60, offset_mm=0.0)
+    assert result.n_folds == inversions(result.points)
+
+
+def test_les_reculs_retires_sont_rapportes(dmu_fusionne):
+    """Ce que le filtre a enlevé se lit dans le résultat, pas seulement dans le tracé."""
+    result = surface_path(dmu_fusionne, SOURCE, CIBLE, num_points=60, offset_mm=25.0)
+    assert result.n_retreats_removed >= 0
+    assert isinstance(result.n_retreats_removed, int)
+
+
+def test_le_trace_garde_ses_extremites_malgre_le_filtre(dmu_fusionne):
+    """Retirer un recul ne doit pas déplacer la source ni la cible."""
+    result = surface_path(dmu_fusionne, SOURCE, CIBLE, num_points=60, offset_mm=25.0)
+    # Le décalage écarte les extrémités de la surface ; elles restent proches.
+    assert np.linalg.norm(np.asarray(result.points[0], dtype=float) - SOURCE) < 80.0
+    assert np.linalg.norm(np.asarray(result.points[-1], dtype=float) - CIBLE) < 80.0
+
+
+def test_le_depliage_ne_sacrifie_pas_la_marge(dmu_fusionne):
+    """Retirer les replis ne doit pas rapprocher le câble de la structure."""
+    result = surface_path(dmu_fusionne, (120.0, 400.0, 250.0), (1700.0, 400.0, 250.0),
+                          num_points=60, offset_mm=25.0)
+    assert result.min_clearance_mm == pytest.approx(25.0, abs=0.5)
+
+
+def test_la_densite_demandee_est_rendue_malgre_le_depliage(dmu_fusionne):
+    """Le dépliage retire des sommets ; on rétablit ce qu'on a promis."""
+    result = surface_path(dmu_fusionne, (120.0, 400.0, 250.0), (1700.0, 400.0, 250.0),
+                          num_points=48, offset_mm=40.0)
+    assert len(result.points) == 48
+
+
+def test_un_ecart_inatteignable_est_annonce_tel_quel(dmu_fusionne):
+    """La géométrie ne permet pas tout : on dit ce qu'on a obtenu."""
+    result = surface_path(dmu_fusionne, (120.0, 400.0, 250.0), (1700.0, 400.0, 250.0),
+                          num_points=60, offset_mm=100.0)
+    assert result.min_clearance_mm < 100.0
+    assert result.min_clearance_mm > 0.0

@@ -41,6 +41,8 @@ __all__ = [
     "project_progress",
     "project_anchors",
     "prune_redundant_points",
+    "remove_backtracking",
+    "forward_only",
     "arc_positions",
     "project",
     "DEFAULT_CLEARANCE_PASSES",
@@ -437,6 +439,121 @@ def _keeps_shape(candidate, index, mesh, query, required, min_radius_mm) -> bool
     outward = np.einsum("ij,ij->i", samples - closest, mesh.face_normals[faces]) >= 0
     signed = np.where(outward, distance, -distance)
     return bool(signed.min() >= float(np.min(required)))
+
+
+def remove_backtracking(points, min_cos: float = 0.0, keep=(), max_removals=None):
+    """Retire les sommets où le tracé fait demi-tour.
+
+    Un repli n'est pas un coude serré : c'est un aller-retour, deux brins côte
+    à côte qu'aucun opérateur ne peut poser. Il se reconnaît au produit
+    scalaire des deux directions qui se rejoignent au sommet — négatif, la
+    seconde repart d'où venait la première.
+
+    Le sommet fautif est **retiré**, pas déplacé : c'est un point dont le tracé
+    n'avait pas besoin, et le supprimer raccorde directement ses deux voisins.
+    On recommence tant qu'il en reste, un retrait pouvant en révéler un autre.
+
+    Args:
+        points: trajectoire ``(n, 3)``.
+        min_cos: seuil sous lequel un raccord est jugé replié. ``0`` retient
+            les vrais demi-tours ; une valeur positive resserre.
+        keep: indices à conserver quoi qu'il arrive.
+        max_removals: borne, pour ne pas raboter un tracé entier.
+
+    Returns:
+        ``(trajectoire, indices retirés dans la numérotation d'origine)``.
+    """
+    pts = np.asarray(points, dtype=np.float64).copy()
+    if len(pts) < 3:
+        return np.asarray(points), []
+
+    protege = {0, len(pts) - 1} | {int(i) for i in (keep or ())}
+    vivants = list(range(len(pts)))
+    retires: list = []
+    budget = len(pts) if max_removals is None else int(max_removals)
+
+    while len(pts) >= 3 and len(retires) < budget:
+        seg = np.diff(pts, axis=0)
+        norms = np.linalg.norm(seg, axis=1, keepdims=True)
+        unit = seg / np.where(norms > 1e-9, norms, 1.0)
+        cos = np.einsum("ij,ij->i", unit[:-1], unit[1:])
+
+        candidats = [i + 1 for i, c in enumerate(cos)
+                     if c < float(min_cos) and (i + 1) not in protege]
+        if not candidats:
+            break
+
+        # Le pli le plus franc d'abord : le corriger détend souvent ses voisins.
+        fautif = min(candidats, key=lambda i: cos[i - 1])
+        pts = np.delete(pts, fautif, axis=0)
+        retires.append(vivants.pop(fautif))
+        protege = {i - 1 if i > fautif else i for i in protege}
+
+    return pts, sorted(retires)
+
+
+def forward_only(points, start=None, goal=None, keep=(), tolerance_mm: float = 0.0):
+    """Ne conserve que les points qui **avancent** de la source vers la cible.
+
+    Un repli est un demi-tour franc, repérable au produit scalaire de deux
+    directions voisines ; ce n'est pas la même chose qu'un recul. Un tracé peut
+    n'avoir aucun demi-tour et pourtant revenir vers son point de départ, en
+    décrivant une boucle large dont chaque raccord reste ouvert. Mesuré sur une
+    maquette de 2 m : la géodésique brute présentait 55,8 mm de recul cumulé
+    répartis sur deux sommets, dont un pas de 28 mm en arrière.
+
+    On mesure donc la progression pour ce qu'elle est : la projection de chaque
+    point sur la corde source-cible. Un sommet dont la projection est en deçà
+    du maximum déjà atteint est **retiré** — comme pour un repli, c'est un
+    point dont le tracé n'a pas besoin, et le supprimer raccorde directement
+    ses deux voisins. Un seul passage suffit : la projection d'un point ne
+    dépend pas de ses voisins, retirer l'un ne change pas celle des autres.
+
+    Aller *de côté* n'est pas reculer : contourner un obstacle laisse la
+    projection stagner, non décroître. La contrainte ne coûte donc rien aux
+    détours légitimes.
+
+    Args:
+        points: trajectoire ``(n, 3)``.
+        start, goal: extrémités. Par défaut les deux bouts du tracé.
+        keep: indices à conserver quoi qu'il arrive.
+        tolerance_mm: recul toléré avant retrait. Zéro n'en tolère aucun.
+
+    Returns:
+        ``(trajectoire, indices retirés dans la numérotation d'origine)``.
+    """
+    pts = np.asarray(points, dtype=np.float64)
+    if len(pts) < 3:
+        return pts.copy(), []
+
+    source = pts[0] if start is None else np.asarray(start, dtype=np.float64).reshape(3)
+    cible = pts[-1] if goal is None else np.asarray(goal, dtype=np.float64).reshape(3)
+    axe = cible - source
+    portee = float(np.linalg.norm(axe))
+    if portee < 1e-9:
+        return pts.copy(), []
+    axe = axe / portee
+
+    avance = (pts - source) @ axe
+    protege = {0, len(pts) - 1} | {int(i) for i in (keep or ())}
+    tolerance = abs(float(tolerance_mm))
+
+    # Dépasser la cible pour y revenir, c'est reculer aussi : le sommet qui va
+    # au-delà de B oblige B lui-même à revenir en arrière. Comme B ne peut pas
+    # être retiré, c'est le sommet qui dépasse qui saute.
+    plafond = float(avance[-1]) + tolerance
+
+    gardes = [0]
+    retires: list = []
+    sommet = float(avance[0])
+    for i in range(1, len(pts)):
+        if i in protege or (avance[i] >= sommet - tolerance and avance[i] <= plafond):
+            gardes.append(i)
+            sommet = max(sommet, min(float(avance[i]), plafond))
+        else:
+            retires.append(i)
+
+    return pts[gardes].copy(), retires
 
 
 def project(points, mesh=None, required_mm=None, min_radius_mm=None,

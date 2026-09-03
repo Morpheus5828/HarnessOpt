@@ -118,7 +118,9 @@ class TestConformite:
         report = sample_report()
         table = ComplianceTable(root)
         table.update_report(report)
-        assert len([r for r in table._rows if r.winfo_ismapped() or True]) >= len(report.checks)
+        # ``or True`` neutralisait le filtre : le test comptait toutes les
+        # lignes du cache et passait quelle que soit la table.
+        assert len(table._rows) >= len(report.checks)
 
     def test_les_lignes_sont_reutilisees_entre_deux_rafraichissements(self, root):
         """Recréer les widgets à chaque image ferait clignoter l'écran."""

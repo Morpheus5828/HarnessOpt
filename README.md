@@ -252,6 +252,53 @@ Ce décalage ne change pas la **forme** du chemin — il suit toujours la
 structure. Si vous voulez au contraire ignorer la surface et partir droit dans
 la bande de distance, prenez la recherche dans l'espace libre.
 
+#### Le chemin de départ n'a le droit que d'avancer
+
+Le plus court chemin dans un graphe ne repasse jamais par un sommet. Il peut
+en revanche revenir vers sa source : contourner une traverse le long des arêtes
+du maillage fait volontiers reculer le tracé de quelques centimètres avant
+qu'il ne reparte. Mesuré sur une maquette de deux mètres à 7 690 sommets : deux
+sommets en recul, 55,8 mm cumulés, dont un pas de 28 mm en arrière — et le
+raccord correspondant se refermait à 179°.
+
+Deux défauts se cachent là, et il ne faut pas les confondre.
+
+Un **repli** est un demi-tour franc, deux brins côte à côte : il se lit au
+produit scalaire des deux directions qui se rejoignent au sommet. C'est ce que
+retire `remove_backtracking`, appelé par le dépliage après le décalage.
+
+Un **recul** est autre chose. Un tracé peut n'avoir aucun demi-tour et revenir
+malgré tout vers son point de départ, en décrivant une boucle large dont chaque
+raccord reste ouvert. Un arc de 290° échantillonné tous les 10° en est
+l'exemple : `cos` vaut 0,985 partout, aucun repli, et pourtant onze pas en
+arrière. Aucun filtre de replis ne le voit.
+
+`forward_only` mesure donc la progression pour ce qu'elle est : la projection
+de chaque point sur la corde source-cible. Un sommet en deçà du maximum déjà
+atteint est **retiré**, comme un repli — c'est un point dont le tracé n'a pas
+besoin, et le supprimer raccorde directement ses deux voisins. Aller *de côté*
+n'est pas reculer : contourner un obstacle laisse la projection stagner, non
+décroître, et la contrainte ne coûte donc rien aux détours légitimes.
+
+Dépasser la cible pour y revenir en est un cas particulier : le sommet qui va
+au-delà de B oblige B lui-même à reculer. Comme B ne peut pas être retiré,
+c'est le sommet qui dépasse qui saute.
+
+Le filtre passe avant le décalage, puis de nouveau après — pousser chaque point
+le long de sa propre normale peut recréer un recul là où il n'y en avait pas.
+Résultat sur la même maquette, à 0, 25 et 60 mm de décalage : zéro recul, zéro
+repli, et un tracé plus court de 112 mm qu'avant. Ce que le filtre a enlevé se
+lit dans le bandeau d'état, pas seulement dans le tracé.
+
+Un compteur qui ne se remplissait que parfois annonçait par ailleurs zéro repli
+sur un tracé qui en comptait deux : `n_folds` n'était calculé que lorsqu'un
+décalage était demandé. Il est désormais mesuré sur le tracé rendu, dans tous
+les cas.
+
+Côté agents, la référence de l'avancement reste le chemin de départ, et non la
+droite A→B — voir « Interdire le retour en arrière ». Comme cette référence
+n'a plus le droit de reculer, la garantie se propage.
+
 ### A\* pondéré, dont le glouton est un cas particulier
 
 La recherche utilise `f = g + w · h`. `w = 1` donne A\* ; `w` grand rend le
@@ -407,6 +454,23 @@ L'abscisse porte le **numéro d'itération**. Passé quatre cents relevés,
 l'historique est décimé d'un facteur deux plutôt que tronqué : la courbe couvre
 toujours toute la session, début compris, au lieu d'afficher éternellement
 « 0 à 400 » alors que les agents en sont à plusieurs milliers d'itérations.
+
+#### Les mêmes courbes, en plein écran
+
+Les courbes vivent dans un onglet de la page *Cheminement*, à côté de la
+conformité, des conseils et du tableau des agents. C'est la bonne place pour
+jeter un œil ; ce n'en est pas une pour **suivre** une session — quatre séries
+empilées dans un quart d'écran donnent des courbes hautes de deux centimètres.
+Et quand la vue 3D est ouverte par-dessus, on ne les voit plus du tout.
+
+Le bouton **Courbes en plein écran** les ouvre dans leur propre fenêtre,
+plein écran d'emblée, à côté de la 3D. Échap, F11 et un bouton en donnent trois
+sorties : une fenêtre plein écran sans porte de sortie visible est un piège.
+Le bandeau annonce le nombre d'agents et l'itération la plus avancée.
+
+Cette fenêtre ne duplique aucune logique : c'est le même `ProgressCharts`,
+alimenté par le même instantané. Deux jeux de courbes qui divergeraient
+seraient pires qu'un seul trop petit.
 
 ### Les conseils
 
@@ -857,6 +921,68 @@ cloison.
 
 ---
 
+## Régler l'outil pour *votre* faisceau
+
+Un faisceau de deux mètres ne se règle pas comme un cordon de trente
+centimètres, et les valeurs par défaut du dépôt ont été choisies sur des cas
+courts. Deux outils répondent à deux questions différentes.
+
+### La calibration : d'où partir
+
+`core/calibration.py` déduit les réglages de deux grandeurs que vous
+connaissez — la longueur du trajet et le diamètre du toron — et **dit pourquoi**
+il propose chaque valeur. Le bouton *Calibrer* de la page *Cheminement* les
+applique et affiche le raisonnement.
+
+L'espacement des points vient du rayon de cintrage minimal (6 × Ø) : un point
+tous les quarts de rayon. En deçà, le tracé ne peut physiquement pas décrire le
+congé qu'on lui demande ; au-delà, on paie du calcul pour une finesse que la
+géométrie ne peut pas exploiter. Le pas maximal vaut 60 % de cet espacement —
+au-delà, un point dépasse ses voisins d'une itération à l'autre et le tracé se
+replie. Le budget de raffinement vaut 2,5 fois le nombre de points de départ :
+de quoi densifier là où un passage résiste, sans laisser le tracé enfler.
+
+Pour un harnais de **2 015 mm** en Ø20, cela donne :
+
+| Réglage | Valeur | D'où elle vient |
+|---|---|---|
+| points de départ | 68 | un tous les 30 mm |
+| espacement | 30 mm | quart du rayon de cintrage minimal (120 mm) |
+| pas maximal | 18 mm | 60 % de l'espacement |
+| distance minimale | 20 mm | un diamètre de toron |
+| distance maximale | 120 mm | portée admissible entre appuis |
+| points maximum | 170 | 2,5 × le départ |
+
+À comparer aux 48 points espacés de 43 mm que l'outil prenait par défaut : à
+43 mm, un congé de 120 mm ne tient tout simplement pas entre trois points.
+
+### Le balayage : ce que votre cellule en pense
+
+La calibration ne peut pas savoir si votre cellule est encombrée, si vos
+passages sont étroits, ni combien d'itérations votre machine vous laisse.
+`tools/sweep.py` le mesure, sans interface :
+
+```bash
+python tools/sweep.py --mesh maquette.stl --from 0,0,0 --to 2015,0,0 \
+    --diameter 20 --seconds 300 --out balayage.csv
+```
+
+Le script part de la calibration et essaie, autour d'elle, trois valeurs par
+axe (0,7 ×, 1 ×, 1,4 ×). Chaque essai tourne le même budget sur le même DMU
+avec les mêmes extrémités — c'est la seule façon de comparer. Le classement
+retenu est celui de l'application elle-même (`RouteReport.score`), de sorte que
+le gagnant du balayage est aussi celui que l'application choisirait ; trier « à
+la main » sur la longueur aurait désigné quelqu'un d'autre, parce que le score
+hiérarchise les clashs avant la longueur.
+
+`--axes` choisit ce qui varie : un axe donne trois essais, trois axes en
+donnent vingt-sept. Comptez le budget en conséquence.
+
+Si aucun essai n'est admissible, le script le dit et refuse de laisser lire un
+gagnant : un classement entre trajectoires toutes inadmissibles désigne la
+moins mauvaise, ce qui n'est pas la même chose qu'un bon réglage. Sur un
+faisceau de deux mètres, `--seconds 300` est un ordre de grandeur raisonnable.
+
 ## Le connecteur CATIA
 
 Le dialogue avec CATIA passe par une macro VBScript écrite à la volée puis
@@ -894,6 +1020,7 @@ core/
   reward_terms.py           traduction des règles en signal d'apprentissage
   path_planner.py           recherche du chemin de départ dans l'espace libre
   surface_path.py           chemin le long de la surface, sauts entre pièces compris
+  calibration.py            réglages déduits de la longueur et du diamètre du faisceau
   orchestrator.py           rôles, curseur exploration/exploitation, migrations
   agent_team.py             fabrique des réseaux + superviseur d'équipe
   agent_worker.py           boucle d'optimisation d'un agent
@@ -908,9 +1035,12 @@ ui/
   app_window.py             fenêtre principale (assistant 4 étapes)
   theme.py  i18n.py         charte graphique, traductions FR/EN/DE/ES
   charts.py                 courbes (récompense + grandeurs physiques)
+  charts_window.py          les mêmes courbes, en plein écran, à côté de la 3D
   viewer3d.py               vue 3D incrustée (fil de rendu dédié)
   widgets/  pages/          composants et écrans
-tests/                      537 tests hors interface, 147 tests d'interface
+tools/
+  sweep.py                  balayage de réglages sur *votre* DMU, sans interface
+tests/                      567 tests hors interface, 158 tests d'interface
 ```
 
 `core/geometry_metrics.py`, `core/routing_rules.py`, `core/reward_terms.py` et
@@ -934,18 +1064,31 @@ reste celui qu'on connaît.
 
 ### Fichiers hérités
 
-`ui/main_window.py`, `ui/pages/extraction_view.py`, `ui/pages/agent_view.py`,
-`controller/controller.py` et `core/controller/controller.py` sont l'ancienne
-interface et son contrôleur. Ils ne sont plus appelés par `main.py`. Les deux
-contrôleurs sont deux copies quasi identiques du même fichier. Ils sont
-conservés pour référence — à supprimer quand la nouvelle interface vous
-convient.
+L'ancienne interface — `ui/main_window.py`, `ui/pages/extraction_view.py`,
+`ui/pages/agent_view.py` — et `core/controller/controller.py` **ont été
+supprimés**. Ce dernier définissait un `AppController` qui masquait le vrai.
+`old_code/` garde une copie conforme du contrôleur, et l'historique git le reste.
 
+`controller/controller.py` est le jumeau de celui-là, tout aussi injoignable et
+lui aussi porteur d'un `AppController` masquant. Il n'a **pas** été supprimé :
+il a reçu une modification récente, et supprimer un fichier que son auteur
+vient d'ouvrir ne se décide pas tout seul. Il reste à retirer quand vous le
+confirmerez.
+
+Ont également disparu : `core/path_managment/generation.py` (vide),
+`core/path_managment/fixation.py` (copie au bit près de `old_code/fixation.py`)
+et `core/path_managment/smooth.py` (copie au bit près de `core/smooth.py`).
+
+Restent, injoignables depuis `main.py` mais sans copie ailleurs :
 `core/sphere_generation.py`, `core/tools.py`, `core/visualize.py`,
-`core/mesh_fusion.py`, `core/HS9019.py`, `core/smooth.py`,
-`core/path_managment/fixation.py` et `core/path_managment/smooth.py`
-appartiennent à une approche antérieure par graphe et ne sont importés par
-aucun chemin actif.
+`core/mesh_fusion.py`, `core/HS9019.py` et `core/smooth.py` — soit 1 211
+lignes d'une approche antérieure par graphe. Ils ne sont pas supprimés d'office
+parce qu'ils portent de la logique métier dont il n'existe pas d'autre
+exemplaire : c'est à vous de dire si elle a encore un usage.
+
+L'atteignabilité se revérifie à tout moment en suivant les imports depuis
+`main.py`, `config.py` et les tests — imports paresseux compris, puisque c'est
+ainsi que `fixation_scan` appelle le détecteur.
 
 ---
 

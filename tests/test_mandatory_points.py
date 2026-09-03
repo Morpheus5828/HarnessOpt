@@ -7,7 +7,6 @@ négocie pas à cette distance, d'où l'épinglage.
 """
 
 import numpy as np
-import pytest
 
 from core.agent.tool import snap_comb_passages
 
