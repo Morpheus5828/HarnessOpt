@@ -1,6 +1,13 @@
+import os
+
 import torch
 
-CRABE_STL_PATH = r"C:\Users\a609568\Desktop\STL\Fixations_H160\ECS0792A012A_--D_STD01_CABLE-TIE SUPPORT.1_OFFSET.stl"
+# Modèle de crabe par défaut. Un chemin absolu de poste de développement
+# n'existe sur aucune autre machine : l'application affichait donc un
+# avertissement de chargement à chaque démarrage, chez tout le monde sauf une
+# personne. La valeur vient de l'environnement, ou reste vide — auquel cas la
+# pose de crabes est simplement désactivée, et l'application le dit.
+CRABE_STL_PATH = os.environ.get("HARNESSOPT_CRABE_STL", "")
 
 _CRABE_GEOMETRY_CACHE = {}
 

@@ -9,7 +9,6 @@ Deux propriétés comptent plus que le contenu des messages :
 """
 
 import numpy as np
-import pytest
 
 from core import diagnostics as dg
 from core.routing_rules import ALL_RULES, ClearanceModel, RoutingRules, evaluate_route

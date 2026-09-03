@@ -232,6 +232,25 @@ class RoutingPage(ctk.CTkFrame):
         self.btn_advanced.pack(fill="x")
 
         self.card_advanced = Card(left, subtitle=t("routing.advanced.warn"))
+
+        # Les valeurs par défaut ont été posées une fois pour toutes et
+        # conviennent à un faisceau court. Sur deux mètres, elles laissent
+        # quarante millimètres entre deux points — le tracé ne peut plus
+        # décrire un congé. Ce bouton les redéduit de la géométrie du faisceau.
+        self.btn_calibrate = ctk.CTkButton(
+            self.card_advanced.body, text=t("routing.calibrate"), height=32,
+            font=FONT.SMALL_BOLD, fg_color="transparent", border_width=1,
+            border_color=theme.accent, text_color=theme.accent,
+            hover_color=theme.SURFACE_ALT, command=self._on_calibrate,
+        )
+        self.btn_calibrate.pack(fill="x", pady=(0, SPACE.SM))
+
+        self.lbl_calibrate = ctk.CTkLabel(
+            self.card_advanced.body, text=t("routing.calibrate.help"), font=FONT.TINY,
+            text_color=theme.TEXT_FAINT, anchor="w", justify="left", wraplength=520,
+        )
+        self.lbl_calibrate.pack(fill="x", pady=(0, SPACE.MD))
+
         self.f_points = NumberField(
             self.card_advanced.body, label="Points de départ sur la trajectoire",
             help_text="Plus il y en a, plus le tracé est fin — et plus le calcul est long.",
@@ -404,6 +423,14 @@ class RoutingPage(ctk.CTkFrame):
         )
         self.btn_charts_full.pack(side="right", padx=(0, SPACE.MD))
 
+        self.btn_charts_window = ctk.CTkButton(
+            view_bar, text=t("routing.charts.window"), width=180, height=26,
+            font=FONT.SMALL_BOLD, fg_color="transparent", border_width=1,
+            border_color=theme.BORDER, text_color=theme.TEXT,
+            hover_color=theme.SURFACE_ALT, command=self._on_charts_window,
+        )
+        self.btn_charts_window.pack(side="right", padx=(0, SPACE.MD))
+
         # --- état de la vue 3D --------------------------------------------------
         # La petite vue incrustée est supprimée : elle coûtait une capture
         # d'écran par image pour montrer une scène figée, et se disputait le
@@ -552,6 +579,26 @@ class RoutingPage(ctk.CTkFrame):
 
     def _on_edit_toggled(self):
         self.app.controller.set_manual_editing(bool(self.chk_edit.get()))
+
+    def _on_charts_window(self):
+        ouverte = self.app.controller.toggle_charts_window()
+        self.btn_charts_window.configure(
+            text=self.t("routing.charts.window.close") if ouverte
+            else self.t("routing.charts.window")
+        )
+
+    def _on_calibrate(self):
+        """Redéduit les réglages avancés de la géométrie du faisceau."""
+        calibration = self.app.controller.calibrate_settings()
+        if calibration is None:
+            return
+        self.f_points.set(float(calibration.initial_points))
+        self.f_max_points.set(float(calibration.max_points))
+        self.f_step.set(float(calibration.max_step_mm))
+        self.lbl_calibrate.configure(text=calibration.report(self.app.t.lang))
+        self.app.remember(initial_points=calibration.initial_points,
+                          max_points=calibration.max_points,
+                          max_step_mm=calibration.max_step_mm)
 
     def _on_release_pinned(self):
         self.app.controller.clear_pinned_points()

@@ -254,9 +254,10 @@ def test_une_tangente_verticale_ne_degenere_pas():
 # Interdire le retour en arrière
 # ----------------------------------------------------------------------
 
+# project_anchors est couvert par tests/test_manual_editing.py : c'est là que
+# vit la fonctionnalité qu'il sert.
 from core.safety import (  # noqa: E402
     arc_positions,
-    project_anchors,
     project_progress,
     prune_redundant_points,
 )
@@ -421,3 +422,183 @@ def test_l_elagage_est_branche_sur_l_agent():
     source = open("core/agent_worker.py", encoding="utf-8").read()
     assert "safety.prune_redundant_points(" in source
     assert "adaptive_prune_max_per_event" in source
+
+
+# ----------------------------------------------------------------------
+# Retirer les replis
+# ----------------------------------------------------------------------
+
+from core.safety import remove_backtracking  # noqa: E402
+
+
+def trace_repliee():
+    """Un aller-retour franc au milieu d'un trajet par ailleurs droit."""
+    return np.array([[0.0, 0.0, 0.0], [200.0, 0.0, 0.0], [400.0, 0.0, 0.0],
+                     [250.0, 0.0, 0.0],           # le repli
+                     [600.0, 0.0, 0.0], [800.0, 0.0, 0.0], [1000.0, 0.0, 0.0]])
+
+
+def test_un_repli_est_retire():
+    apres, retires = remove_backtracking(trace_repliee())
+    assert len(retires) >= 1
+    assert len(apres) == 7 - len(retires)
+
+
+def test_le_trace_deplie_n_a_plus_d_inversion():
+    apres, _ = remove_backtracking(trace_repliee())
+    seg = np.diff(apres, axis=0)
+    unit = seg / np.linalg.norm(seg, axis=1, keepdims=True)
+    assert np.all(np.einsum("ij,ij->i", unit[:-1], unit[1:]) >= 0.0)
+
+
+def test_un_trace_simple_n_est_pas_touche():
+    droit = np.linspace([0.0, 0.0, 0.0], [1000.0, 0.0, 0.0], 12)
+    apres, retires = remove_backtracking(droit)
+    assert retires == [] and np.allclose(apres, droit)
+
+
+def test_un_coude_franc_n_est_pas_un_repli():
+    """Un virage à 90° avance encore : seul le demi-tour est visé."""
+    coude = np.array([[0.0, 0.0, 0.0], [500.0, 0.0, 0.0], [500.0, 500.0, 0.0]])
+    _, retires = remove_backtracking(coude)
+    assert retires == []
+
+
+def test_le_repli_epargne_les_extremites():
+    apres, _ = remove_backtracking(trace_repliee())
+    assert np.allclose(apres[0], [0.0, 0.0, 0.0])
+    assert np.allclose(apres[-1], [1000.0, 0.0, 0.0])
+
+
+def test_un_point_a_conserver_est_conserve():
+    apres, retires = remove_backtracking(trace_repliee(), keep={3})
+    assert 3 not in retires
+
+
+def test_le_retrait_est_borne():
+    _, retires = remove_backtracking(trace_repliee(), max_removals=1)
+    assert len(retires) <= 1
+
+
+def test_les_indices_rendus_sont_ceux_d_origine():
+    """Sinon l'appelant ne saurait pas quoi décaler chez lui."""
+    _, retires = remove_backtracking(trace_repliee())
+    assert all(0 < i < 6 for i in retires)
+
+
+def test_un_trace_trop_court_traverse_le_filtre_de_replis():
+    for n in (0, 1, 2):
+        apres, retires = remove_backtracking(np.zeros((n, 3)))
+        assert retires == [] and len(apres) == n
+
+
+# --- progression stricte vers la cible ---------------------------------
+#
+# Un repli est un demi-tour franc ; un recul est autre chose. Un tracé peut
+# n'avoir aucun demi-tour et pourtant revenir vers son point de départ en
+# décrivant une boucle large. Les deux filtres sont donc distincts, et le
+# second ne se déduit pas du premier.
+
+from core.safety import forward_only  # noqa: E402
+
+
+def trace_reculante():
+    """Un arc de 290°, échantillonné tous les 10°.
+
+    Chaque raccord n'ouvre que de 10° : aucun demi-tour, ``cos`` vaut 0,985
+    partout. Le tracé n'en revient pas moins vers son point de départ sur la
+    seconde moitié de l'arc. C'est exactement le cas qu'un filtre de replis ne
+    voit pas.
+    """
+    angles = np.radians(np.arange(-90.0, 200.1, 10.0))
+    return np.stack([
+        100.0 + 100.0 * np.cos(angles),
+        100.0 + 100.0 * np.sin(angles),
+        np.zeros_like(angles),
+    ], axis=1)
+
+
+def avance(points, source=None, cible=None):
+    pts = np.asarray(points, dtype=np.float64)
+    a = pts[0] if source is None else np.asarray(source, dtype=np.float64)
+    b = pts[-1] if cible is None else np.asarray(cible, dtype=np.float64)
+    axe = (b - a) / np.linalg.norm(b - a)
+    return (pts - a) @ axe
+
+
+def test_une_boucle_large_recule_sans_faire_demi_tour():
+    """Le fixture doit bien piéger remove_backtracking, sinon le test ne prouve rien."""
+    trace = trace_reculante()
+    _, replis = remove_backtracking(trace)
+    assert replis == []
+    assert (np.diff(avance(trace)) < 0).any()
+
+
+def test_le_recul_est_retire():
+    trace = trace_reculante()
+    apres, retires = forward_only(trace)
+    assert retires, "aucun recul retiré sur un arc qui revient sur lui-même"
+    assert (np.diff(avance(apres, trace[0], trace[-1])) >= -1e-9).all()
+
+
+def test_un_trace_qui_avance_n_est_pas_touche():
+    droit = np.array([[float(x), 0.0, 0.0] for x in (0, 30, 60, 90, 120)])
+    apres, retires = forward_only(droit)
+    assert retires == []
+    assert np.allclose(apres, droit)
+
+
+def test_aller_de_cote_n_est_pas_reculer():
+    """Contourner un obstacle fait stagner la progression, pas décroître."""
+    contournement = np.array([
+        [0.0, 0.0, 0.0],
+        [50.0, 0.0, 0.0],
+        [50.0, 80.0, 0.0],    # plein travers : progression inchangée
+        [50.0, 160.0, 0.0],
+        [200.0, 160.0, 0.0],
+    ])
+    _, retires = forward_only(contournement, [0.0, 0.0, 0.0], [200.0, 160.0, 0.0])
+    assert retires == []
+
+
+def test_depasser_la_cible_puis_revenir_est_un_recul():
+    """La cible ne peut pas être retirée : c'est le sommet qui la dépasse qui saute."""
+    trace = np.array([
+        [0.0, 0.0, 0.0],
+        [60.0, 0.0, 0.0],
+        [140.0, 0.0, 0.0],   # au-delà de la cible
+        [100.0, 0.0, 0.0],
+    ])
+    apres, retires = forward_only(trace)
+    assert retires == [2]
+    assert len(apres) == 3
+
+
+def test_les_extremites_survivent_au_filtre():
+    trace = trace_reculante()
+    apres, _ = forward_only(trace)
+    assert np.allclose(apres[0], trace[0])
+    assert np.allclose(apres[-1], trace[-1])
+
+
+def test_un_point_a_conserver_echappe_au_filtre():
+    _, retires = forward_only(trace_reculante(), keep={20})
+    assert 20 not in retires
+
+
+def test_la_tolerance_laisse_passer_un_petit_recul():
+    serre, _ = forward_only(trace_reculante())
+    large, _ = forward_only(trace_reculante(), tolerance_mm=15.0)
+    assert len(large) > len(serre)
+
+
+def test_un_trace_trop_court_traverse_le_filtre():
+    for n in (0, 1, 2):
+        apres, retires = forward_only(np.zeros((n, 3)))
+        assert retires == [] and len(apres) == n
+
+
+def test_source_et_cible_confondues_ne_levent_pas():
+    trace = np.array([[0.0, 0.0, 0.0], [50.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+    apres, retires = forward_only(trace)
+    assert retires == [] and len(apres) == 3

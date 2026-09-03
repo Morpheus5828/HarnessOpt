@@ -102,6 +102,11 @@ class SurfacePathResult:
     min_clearance_mm: float = 0.0
     #: Écart au bord libre réellement obtenu, en mm.
     edge_clearance_mm: float = 0.0
+    #: Raccords où le tracé repart d'où il venait. Zéro sur un tracé posable.
+    n_folds: int = 0
+    #: Sommets retirés parce qu'ils reculaient vers la source au lieu d'avancer
+    #: vers la cible. Indicateur, pas un défaut : le tracé rendu n'en a plus.
+    n_retreats_removed: int = 0
     #: Décalage effectivement appliqué, en mm (0 = chemin resté sur la surface).
     offset_mm: float = 0.0
 
@@ -131,6 +136,8 @@ class SurfacePathResult:
                 text += f", lifted to {self.min_clearance_mm:.0f} mm off the DMU"
             if self.edge_clearance_mm:
                 text += f", kept {self.edge_clearance_mm:.0f} mm off free edges"
+            if self.n_retreats_removed:
+                text += f", {self.n_retreats_removed} backward vertex(es) dropped"
             return text + "."
 
         text = f"Chemin de surface : {self.total_length_mm:.0f} mm"
@@ -142,6 +149,8 @@ class SurfacePathResult:
             text += f", décollé à {self.min_clearance_mm:.0f} mm du DMU"
         if self.edge_clearance_mm:
             text += f", à {self.edge_clearance_mm:.0f} mm des bords libres"
+        if self.n_retreats_removed:
+            text += f", {self.n_retreats_removed} sommet(s) en recul retiré(s)"
         return text + "."
 
 
@@ -386,15 +395,34 @@ def surface_path(
     if num_points and len(points) >= 2:
         points = _resample(points, int(num_points))
 
+    # Le plus court chemin d'un graphe ne repasse jamais par un sommet, mais
+    # rien ne l'empêche de revenir vers sa source : contourner une traverse le
+    # long des arêtes du maillage fait volontiers reculer le tracé de quelques
+    # centimètres avant de repartir. Un faisceau ne recule pas — on retire les
+    # sommets fautifs avant toute autre chose.
+    from core.safety import forward_only
+
+    points, retreats = forward_only(points, start, goal)
+    n_retreats = len(retreats)
+
     # Décollement : les longueurs mesurées ci-dessus décrivent le trajet le
     # long de la surface, elles ne sont donc pas recalculées ici. Ce qui change
     # est la distance au DMU, mesurée et rapportée séparément.
     min_clearance = 0.0
     if offset_mm and offset_mm > 0:
         try:
-            points, min_clearance = offset_from_surface(mesh, points, float(offset_mm))
+            points, min_clearance, _ = unfold(mesh, points, float(offset_mm))
+            # Le décalage pousse chaque point le long de sa propre normale : il
+            # peut recréer un recul là où il n'y en avait pas.
+            points, again = forward_only(points, start, goal)
+            n_retreats += len(again)
         except Exception:
             offset_mm = 0.0
+
+    if num_points and len(points) != int(num_points):
+        # Le dépliage retire des sommets : on rétablit la densité demandée,
+        # sans quoi le tracé rendu serait plus grossier que ce qu'on a promis.
+        points = _resample(points, int(num_points))
 
     return SurfacePathResult(
         points=points.astype(np.float32),
@@ -404,6 +432,11 @@ def surface_path(
         surface_length_mm=surface_len,
         graph_nodes=n,
         min_clearance_mm=min_clearance,
+        # Mesuré sur le tracé rendu, décalage ou non : un compteur qui ne se
+        # remplit que dans un cas annonçait zéro repli sur un tracé qui en
+        # comptait deux.
+        n_folds=_count_folds(points),
+        n_retreats_removed=n_retreats,
         # On n'annonce que ce qu'on a obtenu : une contrainte levée faute de
         # place ne doit pas se lire comme une contrainte respectée.
         edge_clearance_mm=float(edge_clearance_mm) if edge_applied else 0.0,
@@ -460,6 +493,52 @@ def offset_from_surface(mesh, points, target_mm, passes=4):
     inside = np.einsum("ij,ij->i", result - closest, mesh.face_normals[faces]) < 0
     signed = np.where(inside, -distance, distance)
     return result, float(signed.min())
+
+
+def unfold(mesh, points, target_mm, rounds: int = 3):
+    """Décolle le tracé **sans le replier sur lui-même**.
+
+    Le décalage seul plie le tracé sur une maquette fusionnée. Chaque point est
+    repoussé le long de la normale de **sa** face ; or deux points voisins
+    tombent volontiers sur des faces différentes — de part et d'autre d'une
+    arête, ou sur deux pièces qui se font face — dont les normales sont presque
+    opposées. Poussés chacun de son côté, ils se croisent, et le tracé fait un
+    aller-retour. Mesuré sur un DMU de huit pièces : quatorze inversions de
+    direction pour un écart de 60 mm.
+
+    Lisser les directions de poussée ne règle rien : la marge obtenue cesse
+    d'atteindre la cible sans que les replis disparaissent — essayé, mesuré,
+    abandonné. On garde donc la poussée exacte, face par face, et l'on
+    **retire les sommets repliés** avant de repousser ce qui reste. Un sommet
+    replié est un point dont le tracé n'a pas besoin : le supprimer raccorde
+    directement ses deux voisins.
+
+    Returns:
+        ``(points, marge_minimale, n_replis_restants)``.
+    """
+    from core.safety import remove_backtracking
+
+    result = np.array(points, dtype=np.float64, copy=True)
+    clearance = 0.0
+    for _ in range(max(1, int(rounds))):
+        result, clearance = offset_from_surface(mesh, result, target_mm)
+        unfolded, removed = remove_backtracking(result)
+        if not removed:
+            break
+        result = unfolded
+
+    result, clearance = offset_from_surface(mesh, result, target_mm)
+    return result, clearance, _count_folds(result)
+
+
+def _count_folds(points) -> int:
+    """Nombre de raccords où le tracé repart d'où il venait."""
+    seg = np.diff(np.asarray(points, dtype=np.float64), axis=0)
+    norms = np.linalg.norm(seg, axis=1, keepdims=True)
+    if len(seg) < 2:
+        return 0
+    unit = seg / np.where(norms > 1e-9, norms, 1.0)
+    return int(np.count_nonzero(np.einsum("ij,ij->i", unit[:-1], unit[1:]) < 0.0))
 
 
 def _build_bridges(vertices, labels, n_parts, max_bridge_mm, bridges_per_pair):

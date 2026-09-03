@@ -90,6 +90,7 @@ class AppController:
         self.mesh = None
         self.viewer = None
         self.charts = None
+        self.charts_window = None
         self.rules: RoutingRules | None = None
         self.orchestrator: Orchestrator | None = None
         self.supervisor = None
@@ -1344,6 +1345,79 @@ class AppController:
                                     radius=radius, color="#8E44AD")
         self.viewer.render()
 
+    def toggle_charts_window(self) -> bool:
+        """Ouvre — ou referme — les courbes dans leur propre fenêtre.
+
+        Quatre séries empilées dans un quart d'écran donnent des courbes hautes
+        de deux centimètres : on y voit qu'une valeur monte, pas où elle en est.
+        La fenêtre reprend les mêmes courbes, alimentées par le même
+        instantané — deux jeux qui divergeraient seraient pires qu'un seul trop
+        petit.
+        """
+        from ui.charts_window import ChartsWindow
+
+        if self.charts_window is not None:
+            self.charts_window.close()
+            self.charts_window = None
+            return False
+
+        try:
+            self.charts_window = ChartsWindow(
+                self.view, lang=self.view.t.lang,
+                on_close=lambda: setattr(self, "charts_window", None),
+            )
+        except Exception as exc:
+            self.view.set_status(f"{self.t('routing.charts.window.none')} {exc}", "warn")
+            self.charts_window = None
+            return False
+
+        if self.rules is not None:
+            self.charts_window.set_limits(
+                self.rules.clearance.default_min_mm, self.rules.clearance.max_mm,
+                self.rules.harness.min_bend_radius_mm,
+            )
+        return True
+
+    def calibrate_settings(self):
+        """Réglages déduits de la géométrie du faisceau réellement demandé.
+
+        La longueur retenue est celle du trajet, pas celle de la maquette : ce
+        qui décide de l'espacement des points, c'est la distance à parcourir.
+        À défaut d'extrémités saisies, on ne devine pas — un réglage calculé
+        sur une longueur inventée serait pire que celui qu'il remplace.
+        """
+        from core.calibration import calibrate
+
+        try:
+            values = self.view.pages[2].collect()
+            rule_values = self.view.pages[1].collect()
+            a = np.asarray(values["point_a"], dtype=np.float64)
+            b = np.asarray(values["point_b"], dtype=np.float64)
+        except Exception:
+            self.view.set_status(self.t("routing.calibrate.none"), "warn")
+            return None
+
+        length = float(np.linalg.norm(b - a))
+        if length < 1.0:
+            self.view.set_status(self.t("routing.calibrate.none"), "warn")
+            return None
+
+        calibration = calibrate(
+            length,
+            diameter_mm=rule_values.get("harness_diameter", 20.0),
+            min_margin_mm=rule_values.get("min_margin"),
+            max_margin_mm=rule_values.get("max_margin"),
+            fixation_pitch_mm=rule_values.get("fixation_pitch", 250.0),
+            iterations=values.get("iterations", 500),
+        )
+        print(calibration.report())
+        self.view.set_status(
+            self.t("routing.calibrate.done").format(points=calibration.initial_points,
+                                                    spacing=calibration.spacing_mm),
+            "ok",
+        )
+        return calibration
+
     def clear_pinned_points(self):
         """Libère les points imposés à la main.
 
@@ -1396,6 +1470,8 @@ class AppController:
         if self.charts is not None and playing:
             colors = {n: e.get("color", "#2D7FF9") for n, e in self.benchmark_algos.items()}
             self.charts.update(snapshot, colors)
+        if self.charts_window is not None:
+            self.charts_window.update_charts(snapshot, colors)
 
         delay = REFRESH_RUNNING_MS if playing else REFRESH_IDLE_MS
         self._refresh_job = self.view.after(delay, self._refresh)

@@ -7,7 +7,6 @@ la part de tracé rectiligne ne séparent ces deux cas, d'où une mesure propre.
 """
 
 import numpy as np
-import pytest
 
 from core.geometry_metrics import (
     straightness,

@@ -7,7 +7,6 @@ choisir. Elle n'impose pourtant pas moins un point de passage qu'un peigne.
 """
 
 import numpy as np
-import pytest
 
 from core.fixation_scan import Passage, summarise
 from core.passage_route import Crossing, choose_crossings, merge_anchors

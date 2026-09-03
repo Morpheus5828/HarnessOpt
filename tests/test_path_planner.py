@@ -10,7 +10,7 @@ import pytest
 
 trimesh = pytest.importorskip("trimesh", reason="trimesh requis pour la planification")
 
-from core.geometry_metrics import path_length, straightness
+from core.geometry_metrics import straightness
 from core.path_planner import (
     STRATEGIES,
     PlannerSettings,

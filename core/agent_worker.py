@@ -26,9 +26,9 @@ from core.agent.tool import *
 from core import geometry_metrics as gm
 from core import safety
 from core import reward_terms as rwt
-from core.orchestrator import ROLES, BASE_WEIGHTS
+from core.orchestrator import BASE_WEIGHTS
 from core.passage_route import DEFAULT_ZONE_FACTOR
-from core.routing_rules import ClearanceModel, HarnessSpec, RoutingRules, evaluate_route
+from core.routing_rules import evaluate_route
 
 
 benchmark_algos = {
@@ -178,7 +178,6 @@ def algo_worker(
         # Modèle de distances : uniforme par défaut, différencié par famille de
         # couleur dès que la fusion a produit la table des faces.
         clearance_model = rules.clearance if rules is not None else None
-        n_mesh_faces = len(mesh.faces)
 
         boundary_kdtree = None
         boundary_edges_idx = trimesh.grouping.group_rows(mesh.edges_sorted, require_count=1)
@@ -367,8 +366,6 @@ def algo_worker(
             adaptive_prune_period = max(1, int(cfg.get("adaptive_prune_period", 25)))
             adaptive_prune_max_per_event = int(cfg.get("adaptive_prune_max_per_event", 2))
             adaptive_min_points = int(cfg.get("adaptive_min_points", 12))
-            segment_violation_penalty = cfg.get("segment_violation_penalty", 15.0)
-            segment_test_steps = int(cfg.get("segment_test_steps", 6))
             max_points_cfg = int(cfg.get("max_points", 150))
 
             regression_tolerance = cfg.get("regression_tolerance", 2)
@@ -418,13 +415,11 @@ def algo_worker(
                 local_max_shift = cfg["local_max_shift"] * 1.5
                 noise_decay = cfg.get("crabe_focus_noise_decay", 0.9985) if crabe_focus \
                     else cfg.get("exploration_decay", 0.95)
-                batch_size_gpu = min(cfg.get("batch_size", 256), 256)
                 train_steps_gpu = 1
                 step_momentum = float(np.clip(cfg.get("step_momentum_explorer", 0.3), 0.0, 0.95))
             else:
                 local_max_shift = cfg["local_max_shift"] * 0.7
                 noise_decay = 0.95
-                batch_size_gpu = cfg.get("batch_size", 256)
                 train_steps_gpu = 3
                 step_momentum = float(np.clip(cfg.get("step_momentum_optimizer", 0.7), 0.0, 0.95))
 
@@ -668,14 +663,9 @@ def algo_worker(
                 if prev_disp is not None and prev_disp.shape == total_disp.shape:
                     total_disp = step_momentum * prev_disp + (1.0 - step_momentum) * total_disp
 
-                """if disp_spatial_smoothing > 0.0 and len(danger_indices) > 1:
-                    full_disp = np.zeros_like(wp_current)
-                    full_disp[danger_indices] = total_disp
-                    neighbor_mean = (full_disp[:-2] + full_disp[2:]) / 2.0
-                    full_disp[1:-1] = (1.0 - disp_spatial_smoothing) * full_disp[1:-1] + \
-                                      disp_spatial_smoothing * neighbor_mean
-                    total_disp = full_disp[danger_indices]"""
-
+                # Le lissage se fait sur les seuls points déplacés, via
+                # apply_spatial_smoothing : le faire sur la trajectoire entière
+                # tirait aussi les points figés.
                 if disp_spatial_smoothing > 0.0 and len(danger_indices) > 1:
                     total_disp = apply_spatial_smoothing(total_disp, smoothing_factor=disp_spatial_smoothing)
 
@@ -710,9 +700,6 @@ def algo_worker(
                     band_bonus=100.0, too_close_penalty=50.0, too_far_penalty=5.0,
                 )
 
-                mask_soft = (distances[danger_indices] >= required_here) & (distances[danger_indices] < d_soft)
-                mask_hard = distances[danger_indices] < required_here
-                mask_sky = distances[danger_indices] >= d_soft
 
                 dist_to_goal_current = np.linalg.norm(wp_current - point_B, axis=1)
                 progression_error = dist_to_goal_current[danger_indices] - dist_to_goal_current[danger_indices - 1]
@@ -720,12 +707,6 @@ def algo_worker(
 
                 progress = np.einsum('ij,ij->i', total_disp, dir_escapes)
                 R_towards = (progress * 1.0) + R_sequence
-
-                v_in = proposed_wps - wp_current[danger_indices - 1]
-                v_out = wp_current[danger_indices + 1] - proposed_wps
-                norm_in = np.linalg.norm(v_in, axis=1) + 1e-8
-                norm_out = np.linalg.norm(v_out, axis=1) + 1e-8
-                cos_angle = np.einsum('ij,ij->i', v_in, v_out) / (norm_in * norm_out)
 
                 # Cintrage jugé sur le rayon réellement réalisable, en mm, et
                 # non plus sur le cosinus entre segments : le signal ne dépend
@@ -783,23 +764,9 @@ def algo_worker(
                 candidate_full = wp_current.copy()
                 candidate_full[danger_indices] = proposed_wps
 
-                """if segment_violation_penalty > 0 and len(candidate_full) > 1:
-                    seg_test_pts = get_segment_test_points(candidate_full, steps=segment_test_steps)
-                    with geom_lock:
-                        _, seg_test_dist, seg_test_faces = local_pq.on_surface(seg_test_pts)
-                        seg_centroids = mesh.vertices[mesh.faces[seg_test_faces]].mean(axis=1)
-                        seg_inside = np.einsum('ij,ij->i', seg_test_pts - seg_centroids,
-                                               mesh.face_normals[seg_test_faces]) < 0
-                    seg_viol_count = (seg_inside | (seg_test_dist < safe_margin)).reshape(
-                        len(candidate_full) - 1, -1).sum(axis=1).astype(np.float32)
-                    viol_per_point = np.zeros(len(candidate_full), dtype=np.float32)
-                    viol_per_point[:-1] += seg_viol_count
-                    viol_per_point[1:] += seg_viol_count
-
-                    viol_fraction = viol_per_point[danger_indices] / float(2 * segment_test_steps)
-                    R_tunnel = -segment_violation_penalty * viol_fraction
-                else:
-                    R_tunnel = np.zeros(len(danger_indices), dtype=np.float32)"""
+                # Un calcul de pénétration par échantillonnage de segments a
+                # vécu ici, également mis entre guillemets plutôt que retiré.
+                # compute_collision_penalties le remplace, juste en dessous.
 
                 if cfg.get("segment_violation_penalty", 0) > 0 and len(candidate_full) > 1:
                     with geom_lock:
@@ -1148,132 +1115,11 @@ def algo_worker(
 
             current_collisions = int(np.sum(ins_test | (distances_test < safe_margin)))
 
-            # ==========================================================
-            # 🧬 RAFFINEMENT ADAPTATIF
-            # ==========================================================
-            """max_points_reached_msg = ""
-            n_segments = len(smoothed_waypoints) - 1
-            if n_segments > 0:
-                viol_per_test = (ins_test | (distances_test < safe_margin)).reshape(n_segments, -1)
-                segment_violation = viol_per_test.any(axis=1)
-                deep_per_test = (ins_test | (distances_test < hard_min_clearance)).reshape(n_segments, -1)
-                segment_hard_violation = deep_per_test.any(axis=1) | crossing_mask
-
-                if seg_streak is None or len(seg_streak) != n_segments:
-                    seg_streak = np.zeros(n_segments, dtype=np.float32)
-                seg_streak = np.where(segment_violation | segment_hard_violation,
-                                      seg_streak + 1.0, np.maximum(seg_streak - 2, 0))
-
-                violating_idx = np.where(seg_streak > adaptive_insert_streak_threshold * insert_backoff)[0]
-                budget = max_points_cfg - len(smoothed_waypoints)
-
-                if len(violating_idx) > 0 and budget > 0 and regress_streak == 0:
-                    n_insert = min(budget, adaptive_insert_max_per_event)
-                    ranked = violating_idx[np.argsort(-seg_streak[violating_idx])][:n_insert]
-                    for seg_idx in np.sort(ranked)[::-1]:
-                        mid_point = (smoothed_waypoints[seg_idx] + smoothed_waypoints[seg_idx + 1]) / 2.0
-                        with geom_lock:
-                            mid_closest, mid_dist, mid_face = local_pq.on_surface(mid_point[None, :])
-                        mid_normal = mesh.face_normals[mid_face[0]]
-                        mid_vec = mid_point - mid_closest[0]
-                        mid_norm = np.linalg.norm(mid_vec)
-                        mid_inside = mid_norm < 1e-8 or np.dot(mid_vec, mid_normal) < 0
-                        mid_dir = mid_normal if mid_inside else mid_vec / mid_norm
-                        shift = (mid_closest[0] + mid_dir * ideal_target) - mid_point
-                        shift_norm = np.linalg.norm(shift)
-
-                        if shift_norm > max_total_step:
-                            shift = shift * (max_total_step / shift_norm)
-                        new_point = (mid_point + shift).astype(smoothed_waypoints.dtype)
-                        smoothed_waypoints = np.insert(smoothed_waypoints, seg_idx + 1, new_point, axis=0)
-                        new_origin_point = (original_waypoints[seg_idx] + original_waypoints[seg_idx + 1]) / 2.0
-                        original_waypoints = np.insert(original_waypoints, seg_idx + 1, new_origin_point, axis=0)
-                        if crabe_focus and locked_crabe_indices:
-                            shifted_indices = set()
-                            shifted_data = {}
-                            for lidx in locked_crabe_indices:
-                                new_lidx = lidx + 1 if lidx >= seg_idx + 1 else lidx
-                                shifted_indices.add(new_lidx)
-                                shifted_data[new_lidx] = locked_crabe_data[lidx]
-                            locked_crabe_indices = shifted_indices
-                            locked_crabe_data = shifted_data
-                    seg_streak = None
-                    local_pts = len(smoothed_waypoints)
-                    prev_disp = None
-                    success_streak = 0
-                    shape_changed_this_iter = True
-                    last_insert_event_iter = current_iter
-                    best_at_last_insert = best_collisions
-
-                elif (not np.any(segment_violation | segment_hard_violation)
-                      and len(smoothed_waypoints) > adaptive_min_points
-                      and current_iter % adaptive_prune_period == 0):
-                    # Le mouvement inverse de l'insertion. Une fois le passage
-                    # trouvé, le tracé restait aussi dense qu'au plus fort de la
-                    # difficulté — et cette densité empêche de tendre la courbe :
-                    # plus il y a de sommets sur un arc, plus il en faut aligner
-                    # pour le redresser. On n'élague que là où le segment de
-                    # remplacement reste conforme, distance **et** cintrage : un
-                    # point qui sert à contourner quelque chose n'est jamais
-                    # candidat.
-                    with geom_lock:
-                        pruned, removed_idx = safety.prune_redundant_points(
-                            smoothed_waypoints, mesh=mesh, required_mm=safe_margin,
-                            min_radius_mm=min_bend_radius, frozen=frozen_indices,
-                            max_removals=adaptive_prune_max_per_event,
-                        )
-                    if removed_idx:
-                        smoothed_waypoints = np.asarray(
-                            pruned, dtype=smoothed_waypoints.dtype
-                        )
-                        original_waypoints = np.delete(
-                            original_waypoints, removed_idx, axis=0
-                        )
-                        if crabe_focus and locked_crabe_indices:
-                            shifted_indices, shifted_data = set(), {}
-                            for lidx in locked_crabe_indices:
-                                shift = sum(1 for r in removed_idx if r < lidx)
-                                shifted_indices.add(lidx - shift)
-                                shifted_data[lidx - shift] = locked_crabe_data[lidx]
-                            locked_crabe_indices = shifted_indices
-                            locked_crabe_data = shifted_data
-                        seg_streak = None
-                        local_pts = len(smoothed_waypoints)
-                        prev_disp = None
-                        shape_changed_this_iter = True
-                elif len(violating_idx) > 0 and budget <= 0:
-                    max_points_reached_msg = f" ⚠️ max_points({max_points_cfg}) atteint, encore {len(violating_idx)} segment(s) en collision"
-
-                need_budget = (len(violating_idx) > 0 and budget < adaptive_insert_max_per_event) or \
-                              (len(smoothed_waypoints) > 0.9 * max_points_cfg)
-                if need_budget and not shape_changed_this_iter and len(smoothed_waypoints) > 8:
-                    deviation = np.linalg.norm(
-                        smoothed_waypoints[1:-1] - (smoothed_waypoints[:-2] + smoothed_waypoints[2:]) / 2.0,
-                        axis=1)
-                    clean_seg = ~segment_violation
-                    removable = clean_seg[:-1] & clean_seg[1:] & (deviation < band_width * 0.2)
-                    candidates = np.where(removable)[0] + 1
-                    if crabe_focus and locked_crabe_indices:
-                        candidates = np.array([i for i in candidates if i not in locked_crabe_indices],
-                                              dtype=int)
-                    picked = []
-                    for i in candidates[np.argsort(deviation[candidates - 1])] if len(candidates) else []:
-                        if all(abs(int(i) - j) >= 2 for j in picked):
-                            picked.append(int(i))
-                        if len(picked) >= adaptive_insert_max_per_event:
-                            break
-                    for i in sorted(picked, reverse=True):
-                        smoothed_waypoints = np.delete(smoothed_waypoints, i, axis=0)
-                        original_waypoints = np.delete(original_waypoints, i, axis=0)
-                        if crabe_focus and locked_crabe_indices:
-                            locked_crabe_indices = {(l - 1 if l > i else l) for l in locked_crabe_indices}
-                            locked_crabe_data = {(l - 1 if l > i else l): d
-                                                 for l, d in locked_crabe_data.items()}
-                    if picked:
-                        seg_streak = None
-                        local_pts = len(smoothed_waypoints)
-                        prev_disp = None
-                        shape_changed_this_iter = True"""
+            # Une version antérieure du raffinement adaptatif vivait ici, mise
+            # entre triple guillemets plutôt que supprimée. Cent vingt lignes
+            # qui ressemblaient à du code sans jamais s'exécuter — et où une
+            # correction a fini par être écrite par erreur, sans effet. La
+            # version qui tourne est plus bas.
 
             # ==========================================================
             # 🧬 RAFFINEMENT ADAPTATIF (VERSION CORRIGÉE & SÉCURISÉE)
