@@ -1,5 +1,9 @@
 J'aimerais te faire remonter quelques soucis utilisateur que j'ai pu rencontrer lors de la prise en main.
-- Lors du cheminement, lorsque tu as détecter les p_in et p_out je voudrais que tu laisses le choix à l'utilisateur lorsque la pop s'ouvre pour savoir si il veux que l'appli choissient ces pts de fixation, de pouvoir choisir quel couple (p_in, p_out) veux t il choisir stp avec un system de click ou de select box. 
-Tu ajouteras donc le fait de dessiner des petites spèhres sur les p_in et p_out relier d'un segment vert. 
-Lors du cheminement je veux que tu laisses ces spheres et ces segments sur le rendu 3D stp.
-- J'ai remarqué une erreur lors du cheminement en passant par les pts de fixation p_in, p_out), parfois entre la sphère verte et rouge il a des fixations, je suis d'accord que les chemins doivent passer devant, par contre les fixations qui ne sont pas dans la zone de rooting ne doivent pas être pris en compte. Il doit s'arreter au bon endroit.
+- J'ai essayer d'améliorer quelques outils de l'application notamment la version Beta qui a pour but de décaler manuellement un des points présent dans le chemin du routage.
+Cette fonctionalité contient certains bhug notamment qu'elle va moins respecter le travail des agents.
+- Je voudrais aussi avoir dans la page de cheminement les graphes de performances des agents, je veux qu'il puissent prendre toute la demi page droite de l'application pour les voir. 
+- Je voudrais aussi que sur la page 3D voir TOUT le temps les points de fixations affiché, dès l'ouverture de la page 3d la première fois.
+- J'ai remarqué que lors du premier j'ai aussi vu des marche avec recul et chaîne non simple comme du backtracking, je ne veux pas.
+- Dernier point si par exemple l'(agent doit faire un virage, il peut augmenter le nombre de point ainsi que la distance, mais il peut aussi faire le mouvement inverse.
+Si il doit réduire un angle, il réduit le nb de points et donc la longueur pour tendre le plus possible la courbe, (pense bien à la garder proche de l'envirronement).
+- Fait un point sur le code aussi 

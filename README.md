@@ -1064,12 +1064,16 @@ reste celui qu'on connaît.
 
 ### Fichiers hérités
 
-L'ancienne interface et son contrôleur — `ui/main_window.py`,
-`ui/pages/extraction_view.py`, `ui/pages/agent_view.py`,
-`controller/controller.py` et `core/controller/controller.py` — **ont été
-supprimés**. Les deux contrôleurs étaient deux copies du même fichier, dont
-l'une définissait un `AppController` qui masquait le vrai. `old_code/` en garde
-une copie conforme, et l'historique git le reste.
+L'ancienne interface — `ui/main_window.py`, `ui/pages/extraction_view.py`,
+`ui/pages/agent_view.py` — et `core/controller/controller.py` **ont été
+supprimés**. Ce dernier définissait un `AppController` qui masquait le vrai.
+`old_code/` garde une copie conforme du contrôleur, et l'historique git le reste.
+
+`controller/controller.py` est le jumeau de celui-là, tout aussi injoignable et
+lui aussi porteur d'un `AppController` masquant. Il n'a **pas** été supprimé :
+il a reçu une modification récente, et supprimer un fichier que son auteur
+vient d'ouvrir ne se décide pas tout seul. Il reste à retirer quand vous le
+confirmerez.
 
 Ont également disparu : `core/path_managment/generation.py` (vide),
 `core/path_managment/fixation.py` (copie au bit près de `old_code/fixation.py`)
