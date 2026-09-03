@@ -32,6 +32,9 @@ class FakeActor:
     def SetVisibility(self, value):
         self.visible = bool(value)
 
+    def GetVisibility(self):
+        return self.visible
+
 
 class FakeInteractor:
     def __init__(self):
@@ -56,6 +59,7 @@ class FakePlotter:
 
     def __init__(self):
         self.actors = {}
+        self.window_size = (320, 240)
         self.render_window = object()
         self.iren = FakeIren()
         self._closed = False
@@ -63,6 +67,10 @@ class FakePlotter:
         self.updates = 0
         self.shown = False
         self.widgets = None
+        #: Textes posés en surimpression, par nom d'acteur.
+        self.texts: dict = {}
+        #: Case à cocher installée dans la fenêtre : (rappel, valeur).
+        self.button = None
 
     # -- ce que le fil appelle -------------------------------------
     def set_background(self, *_a, **_k):
@@ -77,6 +85,7 @@ class FakePlotter:
 
     def remove_actor(self, name):
         self.actors.pop(name, None)
+        self.texts.pop(name, None)
 
     def reset_camera(self):
         self.reset_calls += 1
@@ -91,6 +100,18 @@ class FakePlotter:
 
     def close(self):
         self._closed = True
+
+    def add_text(self, text, position=None, name=None, **_kwargs):
+        self.texts[name] = (text, position)
+        self.actors[name] = FakeActor()
+        return self.actors[name]
+
+    def clear_button_widgets(self):
+        self.button = None
+
+    def add_checkbox_button_widget(self, callback, value=False, **_kwargs):
+        self.button = (callback, bool(value))
+        return self.button
 
     def clear_sphere_widgets(self):
         self.widgets = None
@@ -107,7 +128,7 @@ class FakePlotter:
 @pytest.fixture
 def thread(monkeypatch):
     """Fil de rendu réel, branché sur un plotter factice."""
-    ready, states, moves = [], [], []
+    ready, states, moves, bests = [], [], [], []
 
     monkeypatch.setattr(v3._RenderThread, "_probe_import", staticmethod(lambda: None))
 
@@ -122,6 +143,10 @@ def thread(monkeypatch):
         self._exited = False
         self._observe_exit()
         self._install_handles()
+        self._install_metrics()
+        self._install_legend()
+        self._install_best_button()
+        self._apply_path_filter()
         self._on_window_state(True)
 
     monkeypatch.setattr(v3._RenderThread, "_do_open_window", fake_open)
@@ -129,6 +154,7 @@ def thread(monkeypatch):
         on_ready=lambda ok, err: ready.append((ok, err)),
         on_window_state=states.append,
         on_handle_move=lambda i, p: moves.append((i, p)),
+        on_best_only=bests.append,
         size=(320, 240),
     )
     th.start()
@@ -136,7 +162,7 @@ def thread(monkeypatch):
         if ready:
             break
         time.sleep(0.01)
-    yield th, ready, states, moves
+    yield th, ready, states, moves, bests
     th.stop()
     th.join(timeout=2)
 
@@ -156,13 +182,13 @@ def ouvre(th):
 
 
 def test_le_fil_signale_qu_il_est_pret(thread):
-    th, ready, _, _ = thread
+    th, ready, _, _, _ = thread
     assert ready and ready[0][0] is True
 
 
 def test_la_scene_vit_sans_fenetre(thread):
     """Les ordres sont acceptés fenêtre fermée : la scène est mémorisée."""
-    th, _, _, _ = thread
+    th, _, _, _, _ = thread
     th.orders.put(("add", (object(), "dmu"), {"color": "grey"}))
     drain(th)
     assert "dmu" in th.recipes
@@ -170,16 +196,19 @@ def test_la_scene_vit_sans_fenetre(thread):
 
 
 def test_la_scene_est_rejouee_a_l_ouverture(thread):
-    th, _, _, _ = thread
+    th, _, _, _, _ = thread
     th.orders.put(("add", (object(), "dmu"), {"color": "grey"}))
     th.orders.put(("add", (object(), "traj"), {"color": "blue"}))
     drain(th)
     plotter = ouvre(th)
-    assert set(plotter.actors) == {"dmu", "traj"}
+    # Les surimpressions — tableau, légende, libellé du bouton — sont de
+    # l'habillage : la scène rejouée est celle des géométries.
+    scene = {n for n in plotter.actors if not n.startswith("__")}
+    assert scene == {"dmu", "traj"}
 
 
 def test_un_acteur_retire_disparait_des_deux_cotes(thread):
-    th, _, _, _ = thread
+    th, _, _, _, _ = thread
     th.orders.put(("add", (object(), "dmu"), {}))
     drain(th)
     plotter = ouvre(th)
@@ -190,7 +219,7 @@ def test_un_acteur_retire_disparait_des_deux_cotes(thread):
 
 
 def test_un_ordre_inconnu_ne_tue_pas_le_fil(thread):
-    th, _, _, _ = thread
+    th, _, _, _, _ = thread
     th.orders.put(("nexiste_pas", (), {}))
     th.orders.put(("add", (object(), "dmu"), {}))
     drain(th)
@@ -198,7 +227,7 @@ def test_un_ordre_inconnu_ne_tue_pas_le_fil(thread):
 
 
 def test_un_ordre_qui_echoue_ne_tue_pas_le_fil(thread):
-    th, _, _, _ = thread
+    th, _, _, _, _ = thread
     ouvre(th)
     th.orders.put(("add", (object(),), {}))      # nom manquant
     th.orders.put(("add", (object(), "ok"), {}))
@@ -212,7 +241,7 @@ def test_un_ordre_qui_echoue_ne_tue_pas_le_fil(thread):
 
 def test_une_fenetre_fermee_n_est_plus_rafraichie(thread):
     """Le défaut : VTK dessine dans un contexte détruit et crache des shaders."""
-    th, _, _, _ = thread
+    th, _, _, _, _ = thread
     plotter = ouvre(th)
     for _ in range(50):
         if plotter.updates > 0:
@@ -229,7 +258,7 @@ def test_une_fenetre_fermee_n_est_plus_rafraichie(thread):
 
 def test_la_fermeture_est_detectee_sans_exception(thread):
     """VTK ne lève pas : c'est à nous de le demander."""
-    th, _, states, _ = thread
+    th, _, states, _, _ = thread
     plotter = ouvre(th)
     plotter.ferme_par_l_utilisateur()
     end = time.time() + 2
@@ -240,7 +269,7 @@ def test_la_fermeture_est_detectee_sans_exception(thread):
 
 
 def test_les_autres_signaux_de_fermeture_sont_lus(thread):
-    th, _, _, _ = thread
+    th, _, _, _, _ = thread
 
     plotter = ouvre(th)
     plotter._closed = True
@@ -257,7 +286,7 @@ def test_les_autres_signaux_de_fermeture_sont_lus(thread):
 
 def test_l_evenement_de_sortie_est_observe(thread):
     """C'est le signal que VTK émet quand l'utilisateur clique la croix."""
-    th, _, _, _ = thread
+    th, _, _, _, _ = thread
     plotter = ouvre(th)
     evenements = [event for event, _ in plotter.iren.observers]
     assert "ExitEvent" in evenements
@@ -269,7 +298,7 @@ def test_l_evenement_de_sortie_est_observe(thread):
 
 def test_la_fenetre_se_rouvre_avec_sa_scene(thread):
     """Fermer n'est pas perdre : la scène est décrite, pas dessinée."""
-    th, _, _, _ = thread
+    th, _, _, _, _ = thread
     th.orders.put(("add", (object(), "dmu"), {}))
     drain(th)
     plotter = ouvre(th)
@@ -281,7 +310,7 @@ def test_la_fenetre_se_rouvre_avec_sa_scene(thread):
 
 
 def test_l_arret_ferme_le_plotter(thread):
-    th, _, _, _ = thread
+    th, _, _, _, _ = thread
     plotter = ouvre(th)
     th.stop()
     th.join(timeout=2)
@@ -298,6 +327,7 @@ def test_pyvista_absent_est_signale_sans_exception(monkeypatch):
     th = v3._RenderThread(on_ready=lambda ok, err: ready.append((ok, err)),
                           on_window_state=lambda _s: None,
                           on_handle_move=lambda _i, _p: None,
+                          on_best_only=lambda _f: None,
                           size=(320, 240))
     th.start()
     th.join(timeout=2)
@@ -311,7 +341,7 @@ def test_pyvista_absent_est_signale_sans_exception(monkeypatch):
 # ----------------------------------------------------------------------
 
 def test_les_poignees_sont_posees_sur_les_points_demandes(thread):
-    th, _, _, _ = thread
+    th, _, _, _, _ = thread
     points = [[0.0, 0.0, 0.0], [100.0, 0.0, 0.0]]
     th.orders.put(("set_handles", (points, 25.0), {}))
     drain(th)
@@ -322,7 +352,7 @@ def test_les_poignees_sont_posees_sur_les_points_demandes(thread):
 
 
 def test_une_poignee_deplacee_est_transmise(thread):
-    th, _, _, moves = thread
+    th, _, _, moves, _ = thread
     th.orders.put(("set_handles", ([[0.0, 0.0, 0.0], [100.0, 0.0, 0.0]], 25.0), {}))
     drain(th)
     callback, _ = ouvre(th).widgets
@@ -331,7 +361,7 @@ def test_une_poignee_deplacee_est_transmise(thread):
 
 
 def test_vider_les_poignees_les_retire(thread):
-    th, _, _, _ = thread
+    th, _, _, _, _ = thread
     th.orders.put(("set_handles", ([[0.0, 0.0, 0.0]], 25.0), {}))
     drain(th)
     plotter = ouvre(th)
@@ -469,3 +499,240 @@ def test_le_basculement_annonce_l_etat_vise(root, slow_probe):
     finally:
         viewer.close()
         frame.destroy()
+
+
+# ----------------------------------------------------------------------
+# Surimpressions : tableau des métriques, légende, filtre
+# ----------------------------------------------------------------------
+#
+# Les trois se posent sur la fenêtre sans faire partie de la scène : elles
+# survivent donc à une fermeture-réouverture, que la scène rejoue de son côté.
+
+def test_le_tableau_des_metriques_va_en_haut_a_droite(thread):
+    th, _, _, _, _ = thread
+    plotter = ouvre(th)
+    th.orders.put(("set_metrics", ("recompense  1  2  3",), {}))
+    drain(th)
+    texte, position = plotter.texts[v3.METRICS_ACTOR]
+    assert "recompense" in texte
+    assert position == "upper_right"
+
+
+def test_un_tableau_vide_retire_l_acteur(thread):
+    th, _, _, _, _ = thread
+    plotter = ouvre(th)
+    th.orders.put(("set_metrics", ("quelque chose",), {}))
+    drain(th)
+    assert v3.METRICS_ACTOR in plotter.texts
+    th.orders.put(("set_metrics", ("",), {}))
+    drain(th)
+    assert v3.METRICS_ACTOR not in plotter.texts
+
+
+def test_la_legende_ecrit_une_ligne_par_agent(thread):
+    th, _, _, _, _ = thread
+    plotter = ouvre(th)
+    th.orders.put(("set_legend", ([("1. TD3", "#2D7FF9"), ("2. SAC", "#E08A00")],), {}))
+    drain(th)
+    lignes = {n: t for n, t in plotter.texts.items() if n.startswith(v3.LEGEND_PREFIX)}
+    assert len(lignes) == 2
+    assert any("TD3" in texte for texte, _ in lignes.values())
+
+
+def test_une_legende_plus_courte_efface_les_lignes_en_trop(thread):
+    """Sinon un agent disparu resterait écrit dans la légende."""
+    th, _, _, _, _ = thread
+    plotter = ouvre(th)
+    th.orders.put(("set_legend", ([("A", "#111111"), ("B", "#222222"),
+                                   ("C", "#333333")],), {}))
+    drain(th)
+    th.orders.put(("set_legend", ([("A", "#111111")],), {}))
+    drain(th)
+    restantes = [n for n in plotter.texts if n.startswith(v3.LEGEND_PREFIX)]
+    assert restantes == [f"{v3.LEGEND_PREFIX}0"]
+
+
+def visibilites(plotter):
+    return {n: a.visible for n, a in plotter.actors.items()
+            if n.startswith(v3.PATH_PREFIX)}
+
+
+def trois_trajectoires(th):
+    for nom in ("alpha", "beta", "gamma"):
+        th.orders.put(("add", (object(), f"{v3.PATH_PREFIX}{nom}"), {}))
+    drain(th)
+
+
+def test_le_filtre_ne_laisse_que_le_meilleur(thread):
+    th, _, _, _, _ = thread
+    plotter = ouvre(th)
+    trois_trajectoires(th)
+    th.orders.put(("set_best_agent", ("beta",), {}))
+    th.orders.put(("set_best_only", (True,), {}))
+    drain(th)
+    assert visibilites(plotter) == {
+        f"{v3.PATH_PREFIX}alpha": False,
+        f"{v3.PATH_PREFIX}beta": True,
+        f"{v3.PATH_PREFIX}gamma": False,
+    }
+
+
+def test_relacher_le_filtre_rend_tout_le_monde(thread):
+    th, _, _, _, _ = thread
+    plotter = ouvre(th)
+    trois_trajectoires(th)
+    th.orders.put(("set_best_agent", ("beta",), {}))
+    th.orders.put(("set_best_only", (True,), {}))
+    drain(th)
+    th.orders.put(("set_best_only", (False,), {}))
+    drain(th)
+    assert all(visibilites(plotter).values())
+
+
+def test_le_filtre_survit_au_redessin_d_une_trajectoire(thread):
+    """Un acteur réajouté est visible d'office : le filtre doit se réappliquer."""
+    th, _, _, _, _ = thread
+    plotter = ouvre(th)
+    trois_trajectoires(th)
+    th.orders.put(("set_best_agent", ("beta",), {}))
+    th.orders.put(("set_best_only", (True,), {}))
+    drain(th)
+    th.orders.put(("add", (object(), f"{v3.PATH_PREFIX}alpha"), {}))
+    drain(th)
+    assert visibilites(plotter)[f"{v3.PATH_PREFIX}alpha"] is False
+
+
+def test_le_filtre_epargne_ce_qui_n_est_pas_une_trajectoire(thread):
+    th, _, _, _, _ = thread
+    plotter = ouvre(th)
+    th.orders.put(("add", (object(), "dmu"), {}))
+    trois_trajectoires(th)
+    th.orders.put(("set_best_agent", ("beta",), {}))
+    th.orders.put(("set_best_only", (True,), {}))
+    drain(th)
+    assert plotter.actors["dmu"].visible is True
+
+
+def test_sans_meilleur_designe_le_filtre_ne_masque_rien(thread):
+    """Masquer tout le monde parce qu'aucun agent n'est encore classé serait pire."""
+    th, _, _, _, _ = thread
+    plotter = ouvre(th)
+    trois_trajectoires(th)
+    th.orders.put(("set_best_only", (True,), {}))
+    drain(th)
+    assert all(visibilites(plotter).values())
+
+
+def test_le_bouton_est_pose_dans_la_fenetre(thread):
+    th, _, _, _, _ = thread
+    plotter = ouvre(th)
+    assert plotter.button is not None
+    assert "__best_label__" in plotter.texts
+
+
+def test_le_bouton_bascule_le_filtre_et_previent(thread):
+    th, _, _, _, bests = thread
+    plotter = ouvre(th)
+    trois_trajectoires(th)
+    th.orders.put(("set_best_agent", ("beta",), {}))
+    drain(th)
+
+    rappel, _valeur = plotter.button
+    rappel(True)
+    assert th._best_only is True
+    assert visibilites(plotter)[f"{v3.PATH_PREFIX}alpha"] is False
+    assert bests == [True]
+
+    rappel(False)
+    assert all(visibilites(plotter).values())
+    assert bests == [True, False]
+
+
+def test_le_libelle_du_bouton_dit_ce_qu_il_fera(thread):
+    th, _, _, _, _ = thread
+    plotter = ouvre(th)
+    avant = plotter.texts["__best_label__"][0]
+    plotter.button[0](True)
+    apres = plotter.texts["__best_label__"][0]
+    assert avant != apres
+
+
+def test_les_surimpressions_survivent_a_une_reouverture(thread):
+    """Elles ne font pas partie de la scène : rien ne les rejouerait sinon."""
+    th, _, _, _, _ = thread
+    ouvre(th)
+    th.orders.put(("set_metrics", ("cintrage 1 2 3",), {}))
+    th.orders.put(("set_legend", ([("1. TD3", "#2D7FF9")],), {}))
+    th.orders.put(("set_best_agent", ("TD3",), {}))
+    th.orders.put(("set_best_only", (True,), {}))
+    drain(th)
+
+    th.orders.put(("close_window", (), {}))
+    drain(th)
+    plotter = ouvre(th)
+
+    assert v3.METRICS_ACTOR in plotter.texts
+    assert f"{v3.LEGEND_PREFIX}0" in plotter.texts
+    assert plotter.button is not None
+    assert th._best_only is True
+
+
+def test_les_ordres_de_surimpression_passent_par_la_facade(root, slow_probe):
+    """La façade ne doit toucher aucun objet VTK : elle dépose des ordres."""
+    import customtkinter as ctk
+
+    frame = ctk.CTkFrame(root)
+    viewer = v3.Viewer3D(frame)
+    try:
+        viewer.start()
+        viewer.set_metrics("x")
+        viewer.set_legend([("A", "#111111")])
+        viewer.set_best_agent("A")
+        viewer.set_best_only(True)
+        assert viewer.best_only is True
+        noms = []
+        while not viewer._thread.orders.empty():
+            noms.append(viewer._thread.orders.get()[0])
+        assert {"set_metrics", "set_legend", "set_best_agent", "set_best_only"} <= set(noms)
+    finally:
+        viewer.close()
+        frame.destroy()
+
+
+def test_la_legende_reste_au_dessus_du_triedre(thread):
+    """Le bas gauche appartient aux axes : la légende s'ancre en haut."""
+    th, _, _, _, _ = thread
+    plotter = ouvre(th)
+    th.orders.put(("set_legend", ([("A", "#111111"), ("B", "#222222")],), {}))
+    drain(th)
+    hauteur = plotter.window_size[1]
+    ordonnees = [position[1] for nom, (_, position) in plotter.texts.items()
+                 if nom.startswith(v3.LEGEND_PREFIX)]
+    assert all(y > hauteur / 2 for y in ordonnees), "légende dans la moitié basse"
+    # La première ligne est la plus haute : la lecture va de haut en bas.
+    assert ordonnees[0] > ordonnees[1]
+
+
+def test_la_legende_suit_le_redimensionnement(thread):
+    """Ancrée depuis le bas, elle glisserait au milieu d'une fenêtre agrandie."""
+    th, _, _, _, _ = thread
+    plotter = ouvre(th)
+    th.orders.put(("set_legend", ([("A", "#111111")],), {}))
+    drain(th)
+    petite = plotter.texts[f"{v3.LEGEND_PREFIX}0"][1][1]
+
+    plotter.window_size = (1600, 1000)
+    th.orders.put(("set_legend", ([("A", "#111111")],), {}))
+    drain(th)
+    grande = plotter.texts[f"{v3.LEGEND_PREFIX}0"][1][1]
+    assert grande > petite
+
+
+def test_sans_taille_de_fenetre_la_legende_se_pose_quand_meme(thread):
+    """Un plotter qui ne sait pas dire sa taille ne doit pas la faire disparaître."""
+    th, _, _, _, _ = thread
+    plotter = ouvre(th)
+    del plotter.window_size
+    th.orders.put(("set_legend", ([("A", "#111111")],), {}))
+    drain(th)
+    assert f"{v3.LEGEND_PREFIX}0" in plotter.texts

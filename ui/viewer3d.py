@@ -50,6 +50,23 @@ MODE_STARTING = "starting"
 #: Taille de la fenêtre 3D.
 DEFAULT_SIZE = (1280, 860)
 
+#: Nom de l'acteur portant le tableau des métriques, en haut à droite.
+METRICS_ACTOR = "__metrics__"
+#: Préfixe des lignes de légende, une par agent.
+LEGEND_PREFIX = "__legend_"
+#: Préfixe des acteurs de trajectoire, tel que le contrôleur les nomme.
+PATH_PREFIX = "traj_"
+
+#: Marge et pas de la légende, en pixels depuis le **haut** de la fenêtre. Le
+#: bas gauche est déjà pris par le trièdre : une légende posée là se lit
+#: par-dessus les axes.
+LEGEND_LEFT = 18
+LEGEND_TOP_MARGIN = 34
+LEGEND_STEP = 22
+#: Position du bouton « meilleur agent seulement », en pixels depuis le bas.
+BUTTON_POSITION = (18.0, 18.0)
+BUTTON_SIZE = 26
+
 
 # ----------------------------------------------------------------------
 # Le fil de rendu
@@ -64,12 +81,13 @@ class _RenderThread(threading.Thread):
     n'offrant aucune garantie de réentrance.
     """
 
-    def __init__(self, on_ready, on_window_state, on_handle_move, size):
+    def __init__(self, on_ready, on_window_state, on_handle_move, on_best_only, size):
         super().__init__(daemon=True, name="viewer3d")
         self.orders: queue.Queue = queue.Queue()
         self._on_ready = on_ready
         self._on_window_state = on_window_state
         self._on_handle_move = on_handle_move
+        self._on_best_only = on_best_only
         self._size = size
         self._stop_event = threading.Event()
 
@@ -83,6 +101,16 @@ class _RenderThread(threading.Thread):
         self._exited = False
         self._handles: list = []
         self._handle_radius = 30.0
+
+        #: Surimpressions. Elles vivent ici et non dans VTK, comme la scène :
+        #: une fenêtre refermée puis rouverte doit les retrouver.
+        self._metrics_text = ""
+        self._legend: list = []
+        #: Filtre d'affichage. Le contrôleur redessine les trajectoires à
+        #: chaque changement ; le filtre doit donc être réappliqué à l'ajout,
+        #: sans quoi un agent masqué réapparaîtrait à sa prochaine itération.
+        self._best_only = False
+        self._best_name: str | None = None
 
     # -- boucle ------------------------------------------------------
 
@@ -207,6 +235,11 @@ class _RenderThread(threading.Thread):
                 self.plotter.add_mesh(geometry, name=name, **style)
             except Exception:
                 pass
+            # Un acteur ajouté est visible d'office : sans ce rappel, un agent
+            # masqué reparaîtrait à sa prochaine itération, le contrôleur
+            # redessinant chaque trajectoire qui bouge.
+            if name.startswith(PATH_PREFIX):
+                self._apply_path_filter()
 
     def _do_remove(self, name):
         self.recipes.pop(name, None)
@@ -238,6 +271,154 @@ class _RenderThread(threading.Thread):
     def _do_render(self):
         return
 
+    # -- surimpressions ----------------------------------------------
+
+    def _do_set_metrics(self, text):
+        self._metrics_text = str(text or "")
+        self._install_metrics()
+
+    def _install_metrics(self):
+        """Tableau des métriques, en haut à droite de la fenêtre.
+
+        Les courbes disent la tendance, pas la valeur : on y lit qu'un rayon de
+        cintrage monte, pas qu'il vaut 118 mm pour une limite à 120. Le
+        tableau donne les trois nombres qui manquent — le minimum et le maximum
+        rencontrés depuis le début, et là où l'on en est.
+
+        Police à chasse fixe : sans elle les colonnes se décalent d'une ligne à
+        l'autre et le tableau devient illisible.
+        """
+        if not self._window_alive():
+            return
+        try:
+            if not self._metrics_text:
+                self.plotter.remove_actor(METRICS_ACTOR)
+                return
+            self.plotter.add_text(
+                self._metrics_text, position="upper_right", font_size=9,
+                font="courier", color="#1B2733", name=METRICS_ACTOR,
+            )
+        except Exception:
+            pass
+
+    def _do_set_legend(self, entries):
+        self._legend = [(str(label), str(color)) for label, color in (entries or [])]
+        self._install_legend()
+
+    def _install_legend(self):
+        """Une ligne par agent, écrite dans sa propre couleur.
+
+        Cinq trajectoires de cinq couleurs ne se lisent pas sans dire laquelle
+        appartient à qui. ``add_legend`` de PyVista le ferait, mais dans une
+        boîte dont on ne maîtrise ni la police ni le placement au pixel ; des
+        textes empilés, chacun de la couleur de sa trajectoire, tiennent le
+        même rôle et restent alignés sur le bouton du dessous.
+        """
+        if not self._window_alive():
+            return
+        for index in range(len(self._legend), 12):
+            try:
+                self.plotter.remove_actor(f"{LEGEND_PREFIX}{index}")
+            except Exception:
+                break
+        # ``add_text`` compte les pixels depuis le bas : on ramène l'ancrage en
+        # haut, où la place est libre. La hauteur est relue à chaque pose, si
+        # bien qu'un redimensionnement se rattrape au rafraîchissement suivant.
+        hauteur = self._window_height()
+        for index, (label, color) in enumerate(self._legend):
+            try:
+                self.plotter.add_text(
+                    label,
+                    position=(LEGEND_LEFT,
+                              hauteur - LEGEND_TOP_MARGIN - index * LEGEND_STEP),
+                    font_size=10, color=color, font="courier",
+                    name=f"{LEGEND_PREFIX}{index}",
+                )
+            except Exception:
+                continue
+
+    def _window_height(self) -> int:
+        """Hauteur utile de la fenêtre, en pixels."""
+        try:
+            return int(self.plotter.window_size[1])
+        except Exception:
+            return int(self._size[1])
+
+    # -- filtre d'affichage ------------------------------------------
+
+    def _do_set_best_agent(self, name):
+        self._best_name = str(name) if name else None
+        self._apply_path_filter()
+
+    def _do_set_best_only(self, flag):
+        self._best_only = bool(flag)
+        self._apply_path_filter()
+
+    def _apply_path_filter(self):
+        """N'affiche que le meilleur agent, ou tous.
+
+        Le filtre porte sur la visibilité, pas sur la scène : les trajectoires
+        masquées restent à jour et reparaissent instantanément, sans avoir à
+        reconstruire cinq tubes.
+        """
+        if not self._window_alive():
+            return
+        garde = f"{PATH_PREFIX}{self._best_name}" if self._best_name else None
+        for name in list(self.actor_names):
+            if not name.startswith(PATH_PREFIX):
+                continue
+            visible = (not self._best_only) or garde is None or name == garde
+            actor = self.plotter.actors.get(name)
+            if actor is not None:
+                try:
+                    actor.SetVisibility(visible)
+                except Exception:
+                    pass
+
+    def _install_best_button(self):
+        """Case à cocher dans la fenêtre elle-même.
+
+        La placer dans la page derrière la 3D obligerait à quitter des yeux ce
+        qu'on est en train de regarder pour changer ce qu'on regarde.
+        """
+        if not self._window_alive():
+            return
+        try:
+            self.plotter.clear_button_widgets()
+        except Exception:
+            pass
+        try:
+            self.plotter.add_checkbox_button_widget(
+                self._best_only_toggled, value=self._best_only,
+                position=BUTTON_POSITION, size=BUTTON_SIZE, border_size=2,
+                color_on="#2D7FF9", color_off="#B7C0CC", background_color="white",
+            )
+            self.plotter.add_text(
+                self._button_label(), position=(BUTTON_POSITION[0] + BUTTON_SIZE + 10,
+                                                BUTTON_POSITION[1] + 4),
+                font_size=10, color="#1B2733", font="courier", name="__best_label__",
+            )
+        except Exception:
+            # Sans interacteur — rendu hors écran, pilote graphique limité — la
+            # case n'existe pas. Le reste de la vue doit continuer.
+            pass
+
+    def _button_label(self) -> str:
+        return "Meilleur agent seulement" if self._best_only else "Tous les agents"
+
+    def _best_only_toggled(self, flag):
+        self._best_only = bool(flag)
+        self._apply_path_filter()
+        try:
+            self.plotter.add_text(
+                self._button_label(),
+                position=(BUTTON_POSITION[0] + BUTTON_SIZE + 10, BUTTON_POSITION[1] + 4),
+                font_size=10, color="#1B2733", font="courier", name="__best_label__",
+            )
+        except Exception:
+            pass
+        self._on_best_only(self._best_only)
+
     # -- fenêtre -----------------------------------------------------
 
     def _do_open_window(self):
@@ -262,6 +443,13 @@ class _RenderThread(threading.Thread):
         self._exited = False
         self._observe_exit()
         self._install_handles()
+        # Les surimpressions vivent hors de VTK : une fenêtre rouverte doit les
+        # retrouver, sinon le tableau et la légende disparaissent au premier
+        # aller-retour et ne reviennent qu'au prochain rafraîchissement.
+        self._install_metrics()
+        self._install_legend()
+        self._install_best_button()
+        self._apply_path_filter()
         self._on_window_state(True)
 
     def _do_close_window(self):
@@ -339,6 +527,10 @@ class Viewer3D:
         self._closed = False
         self._open = False
         self._on_handle_move = None
+        self._on_best_only = None
+        #: Le filtre est piloté depuis la fenêtre 3D ; la façade en garde une
+        #: copie pour que l'appelant puisse la lire sans interroger VTK.
+        self.best_only = False
 
     # -- cycle de vie ---------------------------------------------------
 
@@ -354,6 +546,7 @@ class Viewer3D:
             on_ready=self._post_ready,
             on_window_state=self._post_window_state,
             on_handle_move=self._post_handle_move,
+            on_best_only=self._post_best_only,
             size=DEFAULT_SIZE,
         )
         self._thread.start()
@@ -555,6 +748,38 @@ class Viewer3D:
     def _deliver_handle_move(self, index, point):
         if self._on_handle_move is not None and not self._closed:
             self._on_handle_move(index, point)
+
+    # -- surimpressions ---------------------------------------------------
+
+    def set_metrics(self, text: str):
+        """Tableau des métriques, en haut à droite. Chaîne vide pour l'effacer."""
+        self._order("set_metrics", str(text or ""))
+
+    def set_legend(self, entries):
+        """Légende des trajectoires : suite de ``(libellé, couleur)``."""
+        self._order("set_legend", [(str(a), str(b)) for a, b in (entries or [])])
+
+    # -- filtre d'affichage -----------------------------------------------
+
+    def set_best_agent(self, name: str | None):
+        """Désigne l'agent que le filtre laissera visible."""
+        self._order("set_best_agent", name)
+
+    def set_best_only(self, flag: bool):
+        """Force le filtre depuis l'extérieur de la fenêtre."""
+        self.best_only = bool(flag)
+        self._order("set_best_only", bool(flag))
+
+    def set_on_best_only(self, callback):
+        self._on_best_only = callback
+
+    def _post_best_only(self, flag: bool):
+        self._post(self._deliver_best_only, bool(flag))
+
+    def _deliver_best_only(self, flag: bool):
+        self.best_only = bool(flag)
+        if self._on_best_only is not None and not self._closed:
+            self._on_best_only(flag)
 
     # -- messages ---------------------------------------------------------
 
